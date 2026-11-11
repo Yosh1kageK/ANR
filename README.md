@@ -43,3 +43,15 @@ Please post them as [issues](../../issues/new/choose):
   from under the game's `OptiScaler/custom/Apex Neural Rendering FG` folder.
 
 OptiScaler is GPL-3.0; its source for each release is attached to the release.
+
+## Citation
+
+```bibtex
+@software{apex_neural_rendering,
+  author = {{Apex Compute}},
+  title  = {Apex Neural Rendering (ANR)},
+  year   = {2026},
+  url    = {https://github.com/apex-compute/ANR},
+  note   = {https://apexcompute.com/neural-rendering}
+}
+```
