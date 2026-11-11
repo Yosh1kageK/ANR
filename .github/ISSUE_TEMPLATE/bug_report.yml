@@ -26,4 +26,4 @@ body:
     validations: {required: true}
   - type: textarea
     id: logs
-    attributes: {label: Logs, description: "Attach the newest nr_fg-*.log from under OptiScaler\\custom\\nrfg, and OptiScaler.log if present."}
+    attributes: {label: Logs, description: "Attach the newest nr_fg-*.log from under OptiScaler\\custom\\Apex Neural Rendering FG, and OptiScaler.log if present."}

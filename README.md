@@ -40,6 +40,6 @@ On Windows 10 and 11, and on Linux and SteamOS with Proton.
 Please post them as [issues](../../issues/new/choose):
 - **Performance results**: run the test kit from the release and attach its result file.
 - **Problems**: the game, GPU and driver, operating system, settings and what you saw, with the newest `nr_fg-*.log`
-  from under the game's `OptiScaler/custom/nrfg` folder.
+  from under the game's `OptiScaler/custom/Apex Neural Rendering FG` folder.
 
 OptiScaler is GPL-3.0; its source for each release is attached to the release.
