@@ -18,7 +18,6 @@
 
 1. Download a package from [Releases](../../releases):
    - `anr-fg-full`: for games without OptiScaler.
-   - `anr-fg-integrated`: the same, with our OptiScaler build (adds an on/off toggle).
    - `anr-fg-addon`: for games that already use [OptiScaler](https://github.com/optiscaler/OptiScaler).
 2. Close the game, extract the package and run the installer with the folder of the game's `.exe`:
    - Windows: `install.cmd`
