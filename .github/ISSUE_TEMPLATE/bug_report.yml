@@ -1,0 +1,29 @@
+name: Problem
+description: Artifacts, crashes or anything wrong in a game
+labels: [bug]
+body:
+  - type: input
+    id: game
+    attributes: {label: Game and version, placeholder: "Cyberpunk 2077 2.3, Steam"}
+    validations: {required: true}
+  - type: input
+    id: gpu
+    attributes: {label: GPU and driver, placeholder: "RTX 4070, 581.57"}
+    validations: {required: true}
+  - type: input
+    id: os
+    attributes: {label: Operating system, placeholder: "Windows 11 24H2, or SteamOS 3.7 / Proton 10"}
+    validations: {required: true}
+  - type: input
+    id: settings
+    attributes: {label: Resolution, upscaler, frame generation multiplier, placeholder: "3840x2160, upscaler Quality, 4X"}
+  - type: dropdown
+    id: package
+    attributes: {label: Package, options: [full, integrated, addon]}
+  - type: textarea
+    id: what
+    attributes: {label: What happened, description: "What you saw, where, and how to reproduce it. A short video helps."}
+    validations: {required: true}
+  - type: textarea
+    id: logs
+    attributes: {label: Logs, description: "Attach the newest nr_fg-*.log from under OptiScaler\\custom\\nrfg, and OptiScaler.log if present."}

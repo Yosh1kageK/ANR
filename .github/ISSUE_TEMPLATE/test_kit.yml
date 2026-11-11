@@ -1,0 +1,15 @@
+name: Performance results
+description: Results of the Apex Neural Rendering test kit on your GPU
+labels: [test-kit]
+body:
+  - type: input
+    id: gpu
+    attributes: {label: Computer or GPU, placeholder: "RX 7800 XT desktop; or Steam Deck OLED"}
+    validations: {required: true}
+  - type: textarea
+    id: notes
+    attributes: {label: Notes, description: "Laptops: plugged in? Steam Deck: LCD or OLED, TDP and GPU clock if changed. Anything that went wrong."}
+  - type: textarea
+    id: result
+    attributes: {label: Result file, description: "Attach results/anr-fg-kit-<time>.json (drag it here)."}
+    validations: {required: true}
