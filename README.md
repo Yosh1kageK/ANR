@@ -21,8 +21,8 @@
    - `anr-fg-addon`: for games that already use [OptiScaler](https://github.com/optiscaler/OptiScaler).
 2. Close the game, extract the package and run the installer with the folder of the game's `.exe`:
    - Windows: `install.cmd`
-   - Linux and Steam Deck (Proton): `sh install.sh "<folder>"`, then set the game's launch options to
-     `WINEDLLOVERRIDES="dxgi=n,b" %command%`
+   - Linux and Steam Deck (Proton): `sh install.sh "<folder>"`, then set the game's launch options to the line it
+     prints: `WINEDLLOVERRIDES="dxgi=n,b" %command%`, or `winmm=n,b` in Vulkan games
 3. In the game, turn on frame generation (the NVIDIA option where the game offers several).
 
 To uninstall, run `uninstall.cmd` or `sh uninstall.sh` with the same folder.
