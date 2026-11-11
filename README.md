@@ -28,6 +28,14 @@
 
 To uninstall, run `uninstall.cmd` or `sh uninstall.sh` with the same folder.
 
+## Supported GPUs
+
+- NVIDIA GeForce RTX 20, 30, 40 and 50 series, and GTX 16 series
+- AMD Radeon RX 5000, 6000, 7000 and 9000 series, and Steam Deck
+- Intel Arc A and B series
+
+On Windows 10 and 11, and on Linux and SteamOS with Proton.
+
 ## Results and problems
 
 Please post them as [issues](../../issues/new/choose):
