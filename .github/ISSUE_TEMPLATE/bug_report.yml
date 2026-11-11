@@ -16,7 +16,7 @@ body:
     validations: {required: true}
   - type: input
     id: settings
-    attributes: {label: Resolution, upscaler, frame generation multiplier, placeholder: "3840x2160, upscaler Quality, 4X"}
+    attributes: {label: "Resolution, upscaler, frame generation multiplier", placeholder: "3840x2160, upscaler Quality, 4X"}
   - type: dropdown
     id: package
     attributes: {label: Package, options: [full, integrated, addon]}
