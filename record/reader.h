@@ -27,8 +27,8 @@ namespace record {
 // The Vulkan formats a reader maps (vulkan_core.h's values; the reader does not need Vulkan's headers).
 namespace vk {
 constexpr uint32_t R8G8B8A8_UNORM = 37, R8G8B8A8_SRGB = 43, B8G8R8A8_UNORM = 44, B8G8R8A8_SRGB = 50,
-                   A2B10G10R10_UNORM_PACK32 = 64, R16G16B16A16_SFLOAT = 97, D32_SFLOAT = 126,
-                   D32_SFLOAT_S8_UINT = 130;
+                   A2B10G10R10_UNORM_PACK32 = 64, R16G16B16A16_SFLOAT = 97, B10G11R11_UFLOAT_PACK32 = 122,
+                   D32_SFLOAT = 126, D32_SFLOAT_S8_UINT = 130;
 }
 
 struct Texture {
@@ -105,5 +105,26 @@ struct FgCall {
 };
 bool Fg(const Recording& r, const Call& call, FgCall& out, std::string& error);
 nlohmann::json ToJson(const FgCall& c);
+
+// SR's and RR's parameters of one call (FORMAT.md "SR"), from NGX's names (ngx-dlss, ngx-dlssd): the call's values,
+// else the feature's creation values (record.json "create").
+struct SrCall {
+    uint64_t frame = 0;
+    bool reset = false, hdr = false, depth_inverted = false, motion_jittered = false, motion_low_res = false,
+         auto_exposure = false, sharpening = false;
+    uint32_t create_flags = 0, quality = 0, preset = 0;  // DLSS.Feature.Create.Flags, PerfQualityValue, render preset
+    float jitter[2] = {0, 0};        // render pixels
+    float motion_scale[2] = {1, 1};  // stored motion times this: render pixels
+    uint32_t render_size[2] = {}, output_size[2] = {};  // the part of the inputs in use, and the output's size
+    float pre_exposure = 1, exposure_scale = 1, sharpness = 0;
+    float near_plane = 0, far_plane = 0, fov = 0, frame_time_ms = 0;  // 0: not given
+    // x, y of the part in use of the color, depth, motion and output textures.
+    uint32_t color_base[2] = {}, depth_base[2] = {}, motion_base[2] = {}, output_base[2] = {};
+    uint32_t denoise_mode = 0, roughness_mode = 0;  // RR: DLSS.Denoise.Mode, DLSS.Roughness.Mode (1: in normals' w)
+    float world_to_view[16] = {}, view_to_clip[16] = {};  // RR, as given; has_* false if not given
+    bool has_world_to_view = false, has_view_to_clip = false;
+};
+bool Sr(const Recording& r, const Call& call, SrCall& out, std::string& error);
+nlohmann::json ToJson(const SrCall& c);
 
 }  // namespace record

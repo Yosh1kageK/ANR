@@ -69,6 +69,111 @@ std::string Format(const char* format, ...) {
     return text;
 }
 
+// D3D12's ring: slots in device memory that the packer writes, each copied to its readback buffer on the recorder's
+// copy queue (after the packer's fence, where it names one).
+class D3D12Ring : public Ring {
+public:
+    D3D12Ring(ID3D12Device* device, std::shared_ptr<Packer> packer) : device_(device), packer_(std::move(packer)) {}
+    ~D3D12Ring() override {
+        if (event_)
+            CloseHandle(event_);
+    }
+    bool Describe(const void* texture, Channels& out, std::string& error) override {
+        return packer_->Describe(texture, out, error);
+    }
+    bool Create(unsigned slots, uint64_t bytes, std::string& error) override {
+        D3D12_COMMAND_QUEUE_DESC queue_desc = {D3D12_COMMAND_LIST_TYPE_COPY};
+        if (FAILED(device_->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&queue_))) ||
+            FAILED(device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence_))) ||
+            !(event_ = CreateEventA(nullptr, FALSE, FALSE, nullptr))) {
+            error = "copy queue or fence";
+            return false;
+        }
+        for (unsigned i = 0; i < slots; i++) {
+            Slot& s = slots_[i];
+            D3D12_HEAP_PROPERTIES heap = {};
+            heap.CreationNodeMask = heap.VisibleNodeMask = 1;
+            D3D12_RESOURCE_DESC desc = {};
+            desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            desc.Width = bytes;
+            desc.Height = desc.DepthOrArraySize = desc.MipLevels = 1;
+            desc.SampleDesc.Count = 1;
+            desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+            const bool made =
+                SUCCEEDED(device_->CreateCommittedResource(&heap, packer_->SharedSlots() ? D3D12_HEAP_FLAG_SHARED
+                                                                                         : D3D12_HEAP_FLAG_NONE,
+                                                           &desc, D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                                           IID_PPV_ARGS(&s.vram))) &&
+                (heap.Type = D3D12_HEAP_TYPE_READBACK, desc.Flags = D3D12_RESOURCE_FLAG_NONE,
+                 SUCCEEDED(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                                                            D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                            IID_PPV_ARGS(&s.readback)))) &&
+                SUCCEEDED(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COPY, IID_PPV_ARGS(&s.allocator))) &&
+                SUCCEEDED(device_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COPY, s.allocator.Get(), nullptr,
+                                                     IID_PPV_ARGS(&s.list)));
+            if (!made) {
+                error = "ring slot " + std::to_string(i) + " of " + std::to_string(bytes >> 20) + " MiB";
+                return false;
+            }
+            s.list->Close();
+        }
+        return true;
+    }
+    bool Pack(void* list, uint32_t slot, uint32_t data_start, const std::vector<Packer::Texture>& textures,
+              std::string& error) override {
+        return packer_->Pack(list, slot, slots_[slot].vram.Get(), data_start, textures, error);
+    }
+    int Done(uint32_t slot, uint64_t& bytes, double& gpu_ms) override {
+        Slot& s = slots_[slot];
+        return packer_->Done(slot, bytes, gpu_ms, s.writer, s.writer_value);
+    }
+    const uint8_t* Read(uint32_t slot, uint64_t bytes, std::string& error) override {
+        Slot& s = slots_[slot];
+        s.allocator->Reset();
+        s.list->Reset(s.allocator.Get(), nullptr);
+        s.list->CopyBufferRegion(s.readback.Get(), 0, s.vram.Get(), 0, bytes);
+        s.list->Close();
+        ID3D12CommandList* lists[] = {s.list.Get()};
+        if (s.writer)
+            queue_->Wait(s.writer, s.writer_value);
+        queue_->ExecuteCommandLists(1, lists);
+        queue_->Signal(fence_.Get(), ++fence_value_);
+        if (fence_->GetCompletedValue() < fence_value_) {
+            fence_->SetEventOnCompletion(fence_value_, event_);
+            WaitForSingleObject(event_, 10000);
+        }
+        const D3D12_RANGE range = {0, (SIZE_T)bytes};
+        void* data = nullptr;
+        if (FAILED(s.readback->Map(0, &range, &data)) || !data) {
+            error = "RECORD: a readback buffer did not map";
+            return nullptr;
+        }
+        return (const uint8_t*)data;
+    }
+    void Release(uint32_t slot) override {
+        const D3D12_RANGE none = {0, 0};
+        slots_[slot].readback->Unmap(0, &none);
+    }
+
+private:
+    struct Slot {
+        Microsoft::WRL::ComPtr<ID3D12Resource> vram, readback;
+        Microsoft::WRL::ComPtr<ID3D12CommandAllocator> allocator;
+        Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> list;
+        ID3D12Fence* writer = nullptr;  // what the copy waits for, if the packer names one
+        uint64_t writer_value = 0;
+    };
+    Microsoft::WRL::ComPtr<ID3D12Device> device_;
+    std::shared_ptr<Packer> packer_;
+    Microsoft::WRL::ComPtr<ID3D12CommandQueue> queue_;
+    Microsoft::WRL::ComPtr<ID3D12Fence> fence_;
+    HANDLE event_ = nullptr;
+    uint64_t fence_value_ = 0;
+    Slot slots_[MAX_SLOTS];
+};
+
 }  // namespace
 
 std::string DefaultRoot(const std::string& configured) {
@@ -102,11 +207,8 @@ std::string DefaultRoot(const std::string& configured) {
 }
 
 struct State {
-    enum SlotState : int { FREE, PACKED, COPIED };  // COPIED: in the readback buffer, until its blocks are done
+    enum SlotState : int { FREE, PACKED, COPIED };  // COPIED: in memory (Ring::Read), until its blocks are done
     struct Slot {
-        Microsoft::WRL::ComPtr<ID3D12Resource> vram, readback;
-        Microsoft::WRL::ComPtr<ID3D12CommandAllocator> allocator;
-        Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> list;
         std::atomic<int> state{FREE};
         IndexRecord index;
     };
@@ -120,7 +222,7 @@ struct State {
     };
     Config config;
     Session session;
-    std::shared_ptr<Packer> packer;
+    std::shared_ptr<Ring> ring;
     std::string dir, time;
     std::vector<Texture> textures;
     size_t input_count = 0;
@@ -128,9 +230,6 @@ struct State {
     uint64_t slot_bytes = 0;
     size_t call_bytes = 0;
     std::vector<std::unique_ptr<Slot>> slots;
-    Microsoft::WRL::ComPtr<ID3D12CommandQueue> queue;
-    Microsoft::WRL::ComPtr<ID3D12Fence> fence;
-    HANDLE fence_event = nullptr;
     std::FILE *frames = nullptr, *index = nullptr, *params = nullptr;
     LARGE_INTEGER qpc_frequency = {};
     // The source thread's.
@@ -155,7 +254,7 @@ struct State {
         IndexRecord index;
         uint32_t slot = 0;
         bool store = false;
-        const uint8_t* source = nullptr;  // the mapped readback buffer
+        const uint8_t* source = nullptr;  // the slot in memory (Ring::Read)
         std::vector<uint8_t*> buffers;
         std::vector<uint32_t> sizes;      // stored bytes per block, BLOCK_STORED if not compressed
         std::atomic<uint32_t> remaining{0};
@@ -183,10 +282,6 @@ struct State {
     std::string drop_cause;                // the source thread's: why the ring was last full
     double compress_cpu_s = 0, writer_cpu_s = 0, copier_cpu_s = 0;  // mutex
 
-    ~State() {
-        if (fence_event)
-            CloseHandle(fence_event);
-    }
     void Log(Level level, const std::string& line) const {
         if (config.log)
             config.log(level, line);
@@ -287,7 +382,7 @@ std::vector<uint8_t*> TakeBuffers(State& r, size_t n) {
     return out;
 }
 
-// A copied slot (its readback buffer mapped) as a frame for the workers and the writer.
+// A slot in memory (Ring::Read) as a frame for the workers and the writer.
 void SubmitFrame(State& r, uint32_t slot, const uint8_t* mapped) {
     State::Slot& s = *r.slots[slot];
     auto f = std::make_shared<State::Frame>();
@@ -319,12 +414,11 @@ void SubmitFrame(State& r, uint32_t slot, const uint8_t* mapped) {
     r.Notify();
 }
 
-// The copier: each packed slot, in ring order, once its pack has finished on the GPU, into its readback buffer on
-// the recorder's copy queue, then to the workers. While stopping it waits at most 2 s in all for packs that never ran
+// The copier: each packed slot, in ring order, once its pack has finished on the GPU, into memory (the ring's Read),
+// then to the workers. While stopping it waits at most 2 s in all for packs that never ran
 // (a list the source dropped); their slots are freed as lost.
 void Copier(std::shared_ptr<State> r) {
     uint32_t next = 0;
-    uint64_t fence_value = 0;
     Clock::time_point deadline = Clock::time_point::max();
     for (;;) {
         State::Slot& s = *r->slots[next];
@@ -335,11 +429,10 @@ void Copier(std::shared_ptr<State> r) {
             r->cv.wait_for(lock, std::chrono::milliseconds(2));
             continue;
         }
-        uint64_t bytes = 0, written = 0;
+        uint64_t bytes = 0;
         double gpu_ms = 0;
-        ID3D12Fence* writer = nullptr;  // what the copy waits for, if the packer names one
         int done = 0;
-        while ((done = r->packer->Done(next, bytes, gpu_ms, writer, written)) == 0) {
+        while ((done = r->ring->Done(next, bytes, gpu_ms)) == 0) {
             if (r->stopping && deadline == Clock::time_point::max())
                 deadline = Clock::now() + std::chrono::seconds(2);
             if (Clock::now() > deadline)
@@ -356,31 +449,18 @@ void Copier(std::shared_ptr<State> r) {
             continue;
         }
         const auto start = Clock::now();
-        s.allocator->Reset();
-        s.list->Reset(s.allocator.Get(), nullptr);
-        s.list->CopyBufferRegion(s.readback.Get(), 0, s.vram.Get(), 0, bytes);
-        s.list->Close();
-        ID3D12CommandList* lists[] = {s.list.Get()};
-        if (writer)
-            r->queue->Wait(writer, written);
-        r->queue->ExecuteCommandLists(1, lists);
-        r->queue->Signal(r->fence.Get(), ++fence_value);
-        if (r->fence->GetCompletedValue() < fence_value) {
-            r->fence->SetEventOnCompletion(fence_value, r->fence_event);
-            WaitForSingleObject(r->fence_event, 10000);
-        }
+        std::string why;
+        const uint8_t* data = r->ring->Read(next, bytes, why);
         s.index.bytes = bytes;
         s.index.pack_gpu_ms = (float)gpu_ms;
         s.index.copy_ms = (float)Ms(start, Clock::now());
-        const D3D12_RANGE range = {0, (SIZE_T)bytes};
-        void* data = nullptr;
-        if (FAILED(s.readback->Map(0, &range, &data)) || !data) {
+        if (!data) {
             r->lost++;
-            r->RequestStop("RECORD: a readback buffer did not map");
+            r->RequestStop(why);
             s.state = State::FREE;
         } else {
             s.state = State::COPIED;
-            SubmitFrame(*r, next, (const uint8_t*)data);
+            SubmitFrame(*r, next, data);
         }
         next = (next + 1) % r->slots.size();
     }
@@ -393,7 +473,7 @@ void Copier(std::shared_ptr<State> r) {
 }
 
 // A worker: blocks of the queued frames, zstd at the recording's level (or copied: `store`, or a block zstd does not
-// make smaller); the frame's last block unmaps its readback buffer and frees its slot.
+// make smaller); the frame's last block releases the slot's memory (Ring::Release) and frees it.
 void Worker(std::shared_ptr<State> r) {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     ZSTD_CCtx* cctx = r->level ? ZSTD_createCCtx() : nullptr;
@@ -426,8 +506,7 @@ void Worker(std::shared_ptr<State> r) {
         f.sizes[job.block] = (uint32_t)size;
         f.busy_us += (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - start).count();
         if (--f.remaining == 0) {
-            const D3D12_RANGE none = {0, 0};
-            r->slots[f.slot]->readback->Unmap(0, &none);
+            r->ring->Release(f.slot);
             r->slots[f.slot]->state = State::FREE;
             r->Notify();
         }
@@ -565,15 +644,25 @@ std::unique_ptr<Recorder> Recorder::Start(ID3D12Device* device, std::shared_ptr<
                                           const Config& config, const Session& session,
                                           const std::vector<InputDesc>& inputs, const std::vector<Input>& first,
                                           std::string& error) {
-    if (!device || !packer || inputs.size() != first.size()) {
-        error = "no device, packer or inputs";
+    if (!device || !packer) {
+        error = "no device or packer";
+        return nullptr;
+    }
+    return Start(std::make_shared<D3D12Ring>(device, std::move(packer)), config, session, inputs, first, error);
+}
+
+std::unique_ptr<Recorder> Recorder::Start(std::shared_ptr<Ring> ring, const Config& config, const Session& session,
+                                          const std::vector<InputDesc>& inputs, const std::vector<Input>& first,
+                                          std::string& error) {
+    if (!ring || inputs.size() != first.size()) {
+        error = "no ring or inputs";
         return nullptr;
     }
     auto r = std::make_shared<State>();
     r->config = config;
     r->config.ring = std::clamp(config.ring, 2u, MAX_SLOTS);
     r->session = session;
-    r->packer = std::move(packer);
+    r->ring = std::move(ring);
     r->input_count = inputs.size();
     r->call_bytes = CallBytes(session.parameters.size(), session.matrices.size());
     uint32_t table = 1;
@@ -591,7 +680,7 @@ std::unique_ptr<Recorder> Recorder::Start(ID3D12Device* device, std::shared_ptr<
         t.input = i;
         t.api_format = first[i].api_format;
         std::string why;
-        if (!r->packer->Describe(first[i].texture, t.c, why)) {
+        if (!r->ring->Describe(first[i].texture, t.c, why)) {
             if (inputs[i].required) {
                 error = inputs[i].role + ": " + why;
                 return nullptr;
@@ -636,44 +725,12 @@ std::unique_ptr<Recorder> Recorder::Start(ID3D12Device* device, std::shared_ptr<
         RemoveDirectoryA(r->dir.c_str());
         return nullptr;
     }
-    D3D12_COMMAND_QUEUE_DESC queue_desc = {D3D12_COMMAND_LIST_TYPE_COPY};
-    if (FAILED(device->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&r->queue))) ||
-        FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&r->fence))) ||
-        !(r->fence_event = CreateEventA(nullptr, FALSE, FALSE, nullptr))) {
-        error = "copy queue or fence";
+    if (!r->ring->Create(r->config.ring, r->slot_bytes, error)) {
+        RemoveDirectoryA(r->dir.c_str());
         return nullptr;
     }
-    for (unsigned i = 0; i < r->config.ring; i++) {
-        auto s = std::make_unique<State::Slot>();
-        D3D12_HEAP_PROPERTIES heap = {};
-        heap.CreationNodeMask = heap.VisibleNodeMask = 1;
-        D3D12_RESOURCE_DESC desc = {};
-        desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-        desc.Width = r->slot_bytes;
-        desc.Height = desc.DepthOrArraySize = desc.MipLevels = 1;
-        desc.SampleDesc.Count = 1;
-        desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-        heap.Type = D3D12_HEAP_TYPE_DEFAULT;
-        const bool made =
-            SUCCEEDED(device->CreateCommittedResource(&heap, r->packer->SharedSlots() ? D3D12_HEAP_FLAG_SHARED
-                                                                                    : D3D12_HEAP_FLAG_NONE,
-                                                      &desc, D3D12_RESOURCE_STATE_COMMON, nullptr,
-                                                      IID_PPV_ARGS(&s->vram))) &&
-            (heap.Type = D3D12_HEAP_TYPE_READBACK, desc.Flags = D3D12_RESOURCE_FLAG_NONE,
-             SUCCEEDED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
-                                                       D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-                                                       IID_PPV_ARGS(&s->readback)))) &&
-            SUCCEEDED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COPY, IID_PPV_ARGS(&s->allocator))) &&
-            SUCCEEDED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COPY, s->allocator.Get(), nullptr,
-                                                IID_PPV_ARGS(&s->list)));
-        if (!made) {
-            error = "ring slot " + std::to_string(i) + " of " + std::to_string(r->slot_bytes >> 20) + " MiB";
-            return nullptr;
-        }
-        s->list->Close();
-        r->slots.push_back(std::move(s));
-    }
+    for (unsigned i = 0; i < r->config.ring; i++)
+        r->slots.push_back(std::make_unique<State::Slot>());
     r->frames = std::fopen((r->dir + "\\frames.bin").c_str(), "wb");
     r->index = std::fopen((r->dir + "\\frames.idx").c_str(), "wb");
     r->params = std::fopen((r->dir + "\\params.bin").c_str(), "wb");
@@ -761,7 +818,7 @@ void Recorder::Frame(void* list, uint64_t frame_number, const std::vector<Input>
     s.index.qpc = qpc.QuadPart;
     s.index.dropped = r.pending_dropped;
     std::string error;
-    if (!r.packer->Pack(list, r.next_slot, s.vram.Get(), r.data_start, textures, error))
+    if (!r.ring->Pack(list, r.next_slot, r.data_start, textures, error))
         return StopNow(r, "pack failed: " + error);
     s.state = State::PACKED;
     r.Notify();

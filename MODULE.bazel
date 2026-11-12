@@ -363,3 +363,60 @@ http_archive(
     strip_prefix = "wayland-1.26.0",
     urls = ["https://gitlab.freedesktop.org/wayland/wayland/-/archive/1.26.0/wayland-1.26.0.tar.gz"],
 )
+
+# nr-replay's SR generators (record/replay/README.md "SR and RR"): AMD's FSR API headers and AMD's signed D3D12 loader
+# and upscaler DLLs (FSR SDK 2.4.0; docs/license.md puts them under its MIT section) for the fsr generator, and
+# FidelityFX SDK 1.1.4's single FSR 3.1 DLL (MIT) for the SR capture DLL's ffx forward; Intel's XeSS SDK 3.0.2 headers
+# for the xess generator (users supply libxess.dll).
+http_files = use_repo_rule("//third_party:files.bzl", "http_files")
+
+FSR_SDK = "https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/7539ae8b6568ad29ed78a753404351daf3b5cca7/Kits/FidelityFX/"
+
+http_files(
+    name = "fsr_sdk",
+    build_file_content = """load("@rules_cc//cc:defs.bzl", "cc_library")
+cc_library(
+    name = "upscaler",
+    hdrs = glob(["api/include/**/*.h", "upscalers/include/*.h"]),
+    includes = ["api/include", "upscalers/include"],
+    visibility = ["//visibility:public"],
+)
+filegroup(
+    name = "upscaler_dx12",
+    srcs = ["amd_fidelityfx_loader_dx12.dll", "amd_fidelityfx_upscaler_dx12.dll"],
+    visibility = ["//visibility:public"],
+)
+filegroup(
+    name = "fsr31_dx12",
+    srcs = ["fsr31/amd_fidelityfx_dx12.dll", "fsr31/license.md"],
+    visibility = ["//visibility:public"],
+)
+exports_files(["license.md"])
+""",
+    files = {
+        "api/include/ffx_api.h": [FSR_SDK + "api/include/ffx_api.h", "4d9dcf243ef5efbf03340a02f16b51a22053243a22e8a9a0b3ce91c26982b4bf"],
+        "api/include/ffx_api_types.h": [FSR_SDK + "api/include/ffx_api_types.h", "53f07c113a9ba493f297656e4481b6539aed0afc9f3cc8da682aa477d270c46c"],
+        "api/include/dx12/ffx_api_dx12.h": [FSR_SDK + "api/include/dx12/ffx_api_dx12.h", "c9afbc3c4c673723e9e5369a666f0ff54560543b5a93537f8ff453bf1c3bf530"],
+        "upscalers/include/ffx_upscale.h": [FSR_SDK + "upscalers/include/ffx_upscale.h", "13091e7fe5fd9c82b1fb7c044b9f08f664d9653f599d2ea500738709236fca4d"],
+        "amd_fidelityfx_loader_dx12.dll": [FSR_SDK + "signedbin/amd_fidelityfx_loader_dx12.dll", "e2191d3c0828be45eb8affd4e3ec0378f2293adc345b772a7170edcf3b021ecb"],
+        "amd_fidelityfx_upscaler_dx12.dll": [FSR_SDK + "signedbin/amd_fidelityfx_upscaler_dx12.dll", "aad4fccccb29084a655f9a4f9f613bd22c8c03fb4a0f8840148cc6543b4ccace"],
+        "fsr31/amd_fidelityfx_dx12.dll": ["https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/c6efa6bf7f2027b3ec94f28578bb5965eabb9e55/PrebuiltSignedDLL/amd_fidelityfx_dx12.dll", "12a5081257ec95b0b53ad51b4a87fb3c03f97fe0bbb59f9496968f8d50ef93a6"],
+        "fsr31/license.md": ["https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/c6efa6bf7f2027b3ec94f28578bb5965eabb9e55/docs/license.md", "24574816bc396473a2082ba50aef02640502395b7cdaca49ce3fafe4bf6447fc"],
+        "license.md": [FSR_SDK + "docs/license.md", "32357259b965d6a8001e9e508ba60eda6034027c5923a7d226ffbaff813c2bfb"],
+    },
+)
+
+http_archive(
+    name = "xess_sdk",
+    build_file_content = """load("@rules_cc//cc:defs.bzl", "cc_library")
+cc_library(
+    name = "headers",
+    hdrs = glob(["inc/xess/*.h"]),
+    includes = ["inc/xess"],
+    visibility = ["//visibility:public"],
+)
+exports_files(["bin/libxess.dll", "LICENSE.txt"])
+""",
+    sha256 = "88b8a373f30e33f3558a77a93e634f11b8132fc3047ea1a8edeead32b8471990",
+    urls = ["https://github.com/intel/xess/releases/download/v3.0.2/XeSS_SDK_3.0.2.zip"],
+)

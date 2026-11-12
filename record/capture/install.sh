@@ -1,8 +1,9 @@
 #!/bin/sh
 # Installs nr-record's capture DLL into a game that has OptiScaler (for example from the ANR FG full package):
 #   sh install.sh "<folder of the game's .exe>"
-# Copies nr-record into OptiScaler/custom, sets FGNvngxReplacement=nr-record in OptiScaler.ini (the original is kept in
-# OptiScaler/nr_record_backup), and forwards to ANR FG where it is installed, else to NVIDIA's DLSS-G.
+# Copies nr-record into OptiScaler/custom, sets FGNvngxReplacement=nr-record (frame generation) in OptiScaler.ini (the
+# original is kept in OptiScaler/nr_record_backup), and forwards frame generation to ANR FG where it is installed, else
+# to NVIDIA's DLSS-G. The SR and RR recorder is left for the user to pick in OptiScaler's menu.
 set -e
 game=${1:?usage: sh install.sh "<folder of the game's .exe>"}
 here=$(cd "$(dirname "$0")" && pwd)
@@ -19,7 +20,10 @@ mkdir -p "$backup"
 [ -f "$backup/OptiScaler.ini" ] || cp -p "$ini" "$backup/OptiScaler.ini"   # the original, from before the first install
 settings=""
 [ -f "$dest/dlssg/nr_record.ini" ] && settings=$(mktemp) && cp "$dest/dlssg/nr_record.ini" "$settings"
+sr_settings=""
+[ -f "$dest/dlss/nr_record.ini" ] && sr_settings=$(mktemp) && cp "$dest/dlss/nr_record.ini" "$sr_settings"
 rm -rf "$dest"
+mkdir -p "$game/OptiScaler/custom"
 cp -R "$src" "$dest"
 if [ -n "$settings" ]; then
     mv "$settings" "$dest/dlssg/nr_record.ini"
@@ -31,9 +35,11 @@ else
     sed -i 's|^forward =.*|forward = nvidia|' "$dest/dlssg/nr_record.ini"
     forward="NVIDIA's DLSS-G"
 fi
+[ -n "$sr_settings" ] && mv "$sr_settings" "$dest/dlss/nr_record.ini"
 sed -i 's|^FGNvngxReplacement=[^\r]*|FGNvngxReplacement=nr-record|' "$ini"
 echo "nr-record installed in $game:"
-echo "  OptiScaler/custom/nr-record (the capture DLL), OptiScaler.ini: FGNvngxReplacement=nr-record"
+echo "  OptiScaler/custom/nr-record (the capture DLLs), OptiScaler.ini: FGNvngxReplacement=nr-record"
+echo "  to record SR or RR: pick nr-record as the upscaler in OptiScaler's menu, then F6; pick your upscaler again after"
 echo "  when not recording, frames come from: $forward"
 echo "  the original OptiScaler.ini: OptiScaler/nr_record_backup (sh uninstall.sh \"$game\" restores it)"
 echo "Proton: the game's Steam launch options need: WINEDLLOVERRIDES=\"dxgi=n,b\" %command%"

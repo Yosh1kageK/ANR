@@ -230,7 +230,7 @@ public:
         replay::StreamFrame f;
         if (!stream_.Next(f, image, error))
             return false;
-        const char* kind = f.kind ? "generated" : "real";
+        const char* kind = f.kind == 2 ? "output" : f.kind ? "generated" : "real";
         entry = {{"kind", kind}, {"real", f.b}, {"a", f.a}, {"b", f.b}, {"index", f.index}, {"t", (double)f.t},
                  {"file", nullptr}};
         return true;

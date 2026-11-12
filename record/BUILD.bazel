@@ -1,5 +1,5 @@
 load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
-load("//tools:slang.bzl", "slang_dxil_d3d12")
+load("//tools:slang.bzl", "slang_dxil_d3d12", "slang_spirv")
 
 # nr-record (README.md): recording a rendering feature's inputs (FG, SR, RR) losslessly in games, the format
 # (FORMAT.md) and its reader. This package is the public tool's: it depends on nothing of the rest of the repository.
@@ -11,6 +11,7 @@ cc_library(
     hdrs = [
         "format.h",
         "pool.h",
+        "sr_roles.h",
     ],
 )
 
@@ -38,6 +39,18 @@ slang_dxil_d3d12(
     ],
 )
 
+# The same coding as SPIR-V for Vulkan games, with the free-word counter in device memory (REC_COUNTER).
+slang_spirv(
+    name = "kernels_vk",
+    src = "record_pack.slang",
+    copts = ["-DREC_COUNTER=1"],
+    entries = [
+        "record_init",
+        "record_pack",
+        "record_done",
+    ],
+)
+
 # The recording core's GPU side in D3D12 games: the kernels on the game's command list.
 cc_library(
     name = "d3d12_packer",
@@ -46,6 +59,47 @@ cc_library(
     linkopts = ["d3d12.lib"],
     target_compatible_with = ["@platforms//os:windows"],
     deps = [":recorder"],
+)
+
+# The recording core's ring in Vulkan games: slots in host memory that the kernels write on the game's command buffer.
+cc_library(
+    name = "vulkan_ring",
+    srcs = ["vulkan_ring.cpp"],
+    hdrs = ["vulkan_ring.h"],
+    target_compatible_with = ["@platforms//os:windows"],
+    deps = [
+        ":recorder",
+        "@vulkan_headers",
+    ],
+)
+
+# AMD's FSR upscaler through the FidelityFX API (AMD's DLL at run time), driven by an SR call: the SR capture DLL's ffx
+# forward and nr-replay's fsr generator.
+cc_library(
+    name = "ffx_upscaler",
+    srcs = ["ffx_upscaler.cpp"],
+    hdrs = ["ffx_upscaler.h"],
+    linkopts = ["d3d12.lib"],
+    target_compatible_with = ["@platforms//os:windows"],
+    deps = [
+        ":reader",
+        "@fsr_sdk//:upscaler",
+    ],
+)
+
+# Intel's XeSS through libxess.dll (Intel's DLL at run time), driven by an SR call: the SR capture DLL's xess forward
+# and nr-replay's xess generator.
+cc_library(
+    name = "xess_upscaler",
+    srcs = ["xess_upscaler.cpp"],
+    hdrs = ["xess_upscaler.h"],
+    linkopts = ["d3d12.lib"],
+    target_compatible_with = ["@platforms//os:windows"],
+    deps = [
+        ":ffx_upscaler",
+        ":reader",
+        "@xess_sdk//:headers",
+    ],
 )
 
 cc_library(

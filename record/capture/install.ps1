@@ -1,6 +1,7 @@
 # Installs nr-record's capture DLL into a game that has OptiScaler (for example from the ANR FG full package).
-# Copies nr-record into OptiScaler\custom, sets FGNvngxReplacement=nr-record in OptiScaler.ini (the original is kept in
-# OptiScaler\nr_record_backup), and forwards to ANR FG where it is installed, else to NVIDIA's DLSS-G.
+# Copies nr-record into OptiScaler\custom, sets FGNvngxReplacement=nr-record (frame generation) in OptiScaler.ini (the
+# original is kept in OptiScaler\nr_record_backup), and forwards frame generation to ANR FG where it is installed, else
+# to NVIDIA's DLSS-G. The SR and RR recorder is left for the user to pick in OptiScaler's menu.
 param([string]$Game)
 $ErrorActionPreference = "Stop"
 if (-not $Game) { $Game = Read-Host "The folder of the game's .exe" }
@@ -21,7 +22,11 @@ if (-not (Test-Path (Join-Path $backup "OptiScaler.ini"))) { Copy-Item $ini $bac
 $settings = Join-Path $dest "dlssg\nr_record.ini"
 $kept = $null
 if (Test-Path $settings) { $kept = [IO.File]::ReadAllText($settings) }
+$sr_settings = Join-Path $dest "dlss\nr_record.ini"
+$sr_kept = $null
+if (Test-Path $sr_settings) { $sr_kept = [IO.File]::ReadAllText($sr_settings) }
 if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+New-Item -ItemType Directory -Force (Split-Path $dest) | Out-Null
 Copy-Item -Recurse $src $dest
 if ($kept) {
     [IO.File]::WriteAllText($settings, $kept)
@@ -33,9 +38,11 @@ if ($kept) {
     $t = [IO.File]::ReadAllText($settings) -replace '(?m)^forward =[^\r\n]*', "forward = $value"
     [IO.File]::WriteAllText($settings, $t)
 }
+if ($sr_kept) { [IO.File]::WriteAllText($sr_settings, $sr_kept) }
 [IO.File]::WriteAllText($ini, ($text -replace '(?m)^FGNvngxReplacement=[^\r\n]*', 'FGNvngxReplacement=nr-record'))
 Write-Host "nr-record installed in ${Game}:"
-Write-Host "  OptiScaler\custom\nr-record (the capture DLL), OptiScaler.ini: FGNvngxReplacement=nr-record"
+Write-Host "  OptiScaler\custom\nr-record (the capture DLLs), OptiScaler.ini: FGNvngxReplacement=nr-record"
+Write-Host "  to record SR or RR: pick nr-record as the upscaler in OptiScaler's menu, then F6; pick your upscaler again after"
 Write-Host "  when not recording, frames come from: $forward"
 Write-Host "  the original OptiScaler.ini: OptiScaler\nr_record_backup (uninstall.cmd restores it)"
 Write-Host "Windows needs no launch option."

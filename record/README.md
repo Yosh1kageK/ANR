@@ -17,10 +17,12 @@ Each command prints one JSON line. `decode` writes `f<N>_<role>.bin` per texture
 
 ## How a recording is made
 
+The recorders in games are DLLs that OptiScaler loads in its custom provider slots ([capture/README.md](capture/README.md)): `nvngx_dlssg.dll` for frame generation, and `nr_record_sr.dll` for SR and RR, which gets every upscaler call of a D3D12 game (DLSS, FSR or XeSS) as one NGX DLSS call. [replay/README.md](replay/README.md) runs DLSS-G, DLSS, DLSS-RR, FSR and XeSS on the recordings and makes the videos.
+
 `recorder.h` is the recording core. A recorder in the game (a DLL that receives the feature's calls) gives it, per real frame, the frame's input textures and a command list, and per call the call's parameters:
 
 - Each real frame's textures are coded losslessly on the GPU, on the game's command list, into a slot of a ring in GPU memory (`Packer`; the coding is [FORMAT.md](FORMAT.md#coding-3)'s). The game's queue gets this pass and nothing else, and never waits.
-- A copy queue of the recorder copies each finished slot to memory. Worker threads below normal priority copy (or zstd-compress) it in 2 MiB blocks, which frees the slot, and a writer thread appends the frames and parameters to the folder in order.
+- A copy queue of the recorder copies each finished slot to memory (D3D12). In Vulkan games the pass writes the slot in host memory, as Vulkan gives no queue of our own on the game's device, and an event on the game's command buffer tells when it is complete. Worker threads below normal priority copy (or zstd-compress) it in 2 MiB blocks, which frees the slot, and a writer thread appends the frames and parameters to the folder in order.
 - If the GPU's packs or copies, or the disk, fall behind, the ring fills and real frames are dropped; the next recorded frame marks the gap, and replays reset there.
 - It stops at a time or frame limit, below a free-space limit, on a change of an input's size or format, or when the recorder stops it.
 
@@ -42,6 +44,7 @@ On Windows, `bazel build //record:all` needs an LLVM install (`BAZEL_LLVM`) and 
 | File | What |
 |---|---|
 | `format.h` | The binary records and the coding's size bounds |
-| `recorder.h`, `recorder.cpp` | The recording core (Windows, D3D12) |
+| `recorder.h`, `recorder.cpp` | The recording core (Windows): ring, copier, workers, writer; D3D12's ring |
+| `d3d12_packer.*`, `vulkan_ring.*`, `record_pack.slang` | The GPU coding on a D3D12 game's command list (DXIL) and a Vulkan game's command buffer (SPIR-V) |
 | `reader.h`, `reader.cpp`, `pool.h` | Reading recordings, formats 1 to 4, and decoding frames on the CPU |
 | `nr_record.cpp` | The `nr-record` command |

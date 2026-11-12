@@ -24,7 +24,8 @@ constexpr uint32_t STATUS_BYTES = 8 * MAX_SLOTS, TIMES_BYTES = 16 * MAX_SLOTS;
 // Vulkan format numbers (vulkan_core.h) that record.json names the texels by.
 namespace vk {
 constexpr uint32_t R8_UNORM = 9, R8G8B8A8_UNORM = 37, R8G8B8A8_SRGB = 43, B8G8R8A8_UNORM = 44, B8G8R8A8_SRGB = 50,
-                   A2B10G10R10_UNORM_PACK32 = 64, R16_UNORM = 70, R16_SFLOAT = 76, R16G16_UNORM = 77,
+                   A2B10G10R10_UNORM_PACK32 = 64, R16_UNORM = 70,
+                   B10G11R11_UFLOAT_PACK32 = 122, R16_SFLOAT = 76, R16G16_UNORM = 77,
                    R16G16_SFLOAT = 83, R16G16B16A16_UNORM = 91, R16G16B16A16_SFLOAT = 97, R32_SFLOAT = 100,
                    R32G32_SFLOAT = 103, D32_SFLOAT = 126, D32_SFLOAT_S8_UINT = 130;
 }
@@ -62,6 +63,11 @@ bool DescribeD3D12(const D3D12_RESOURCE_DESC& desc, Channels& out, DXGI_FORMAT& 
     case DXGI_FORMAT_R10G10B10A2_TYPELESS: case DXGI_FORMAT_R10G10B10A2_UNORM:
         view = DXGI_FORMAT_R10G10B10A2_UNORM, out.vk_format = vk::A2B10G10R10_UNORM_PACK32, out.channels = 4,
         out.kinds = 10 | 10 << 8 | 10 << 16 | 2 << 24; break;
+    // Each 11- or 10-bit float is exactly an FP16 value (the same exponent bias, fewer mantissa bits): coded as FP16
+    // and packed again by the reader.
+    case DXGI_FORMAT_R11G11B10_FLOAT:
+        view = desc.Format, out.vk_format = vk::B10G11R11_UFLOAT_PACK32, out.channels = 3,
+        out.kinds = F16 * 0x010101u; break;
     case DXGI_FORMAT_R8G8B8A8_TYPELESS: case DXGI_FORMAT_R8G8B8A8_UNORM:
         view = DXGI_FORMAT_R8G8B8A8_UNORM, out.vk_format = vk::R8G8B8A8_UNORM, out.channels = 4, out.kinds = 0x08080808;
         break;

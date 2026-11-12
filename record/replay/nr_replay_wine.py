@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Runs nr-replay.exe on Linux under Wine with vkd3d-proton (README.md "Linux"), and with --video makes the videos
-with nr-video as the frames come (no frames on disk).
+with nr-video as the frames come (no frames on disk). FG, SR and RR recordings alike.
 
     python3 nr_replay_wine.py --record REC --out OUT --generator provider --dll ANR/nvngx_dlssg.dll --label "ANR FG" \\
         [--b-generator nvidia --b-dll GAME/nvngx_dlssg.dll --b-label DLSS-G] [--video] [--frames A:B] [--raw] ...
@@ -11,8 +11,9 @@ Other options pass to nr-replay (--frames, --multiplier, --mode, --raw, --ngx-lo
 
 Wine: Proton's (newest Proton or GE-Proton under the Steam folders, or --proton DIR), with its vkd3d-proton, DXVK and
 dxvk-nvapi; or --wine PATH with --vkd3d DIR and --dxvk DIR (and --nvapi DIR for nvidia). The prefix is
-$XDG_CACHE_HOME/nr-replay/wine-prefix (--prefix). --generator nvidia also needs the NVIDIA driver's NGX DLLs for Wine
-(_nvngx.dll, nvngx.dll), found next to the driver's libGLX_nvidia.so.0 in nvidia/wine (--nvidia-wine DIR).
+$XDG_CACHE_HOME/nr-replay/wine-prefix (--prefix). --generator nvidia needs the NVIDIA driver's NGX DLLs for Wine
+(_nvngx.dll, nvngx.dll), found next to the driver's libGLX_nvidia.so.0 in nvidia/wine (--nvidia-wine DIR); so do
+dlss and dlssd.
 """
 
 import argparse
@@ -25,6 +26,8 @@ import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+# Frame generation (provider, nvidia) and SR and RR (dlss, dlssd, ngx, fsr, xess, recorded): README.md "Generators".
+GENERATORS = ("provider", "nvidia", "dlss", "dlssd", "ngx", "fsr", "xess", "recorded")
 
 
 def wine_path(path):
@@ -152,11 +155,11 @@ class Wine:
 
 
 def replay_argv(args, generator, dll, label, out, stream):
-    argv = ["--record", wine_path(args.record), "--out", wine_path(out), "--generator", generator, "--dll",
-            wine_path(dll)]
+    argv = ["--record", wine_path(args.record), "--out", wine_path(out), "--generator", generator]
+    argv += ["--dll", wine_path(dll)] if dll else []
     if label:
         argv += ["--label", label]
-    for name in ("frames", "multiplier", "mode"):
+    for name in ("frames", "multiplier", "mode", "preset"):
         if getattr(args, name):
             argv += [f"--{name}", str(getattr(args, name))]
     argv += ["--raw"] if args.raw else []
@@ -169,16 +172,17 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--record", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument("--generator", choices=("provider", "nvidia"), required=True)
-    parser.add_argument("--dll", type=Path, required=True)
+    parser.add_argument("--generator", choices=GENERATORS, required=True)
+    parser.add_argument("--dll", type=Path)
     parser.add_argument("--label")
-    parser.add_argument("--b-generator", choices=("provider", "nvidia"))
+    parser.add_argument("--b-generator", choices=GENERATORS)
     parser.add_argument("--b-dll", type=Path)
     parser.add_argument("--b-label")
     parser.add_argument("--video", action="store_true", help="encode the videos from the frame stream")
     parser.add_argument("--frames")
     parser.add_argument("--multiplier", type=int)
     parser.add_argument("--mode", choices=("interleaved", "generated"))
+    parser.add_argument("--preset", help="SR and RR: DLSS's render preset letter")
     parser.add_argument("--raw", action="store_true")
     parser.add_argument("--ngx-log", action="store_true")
     parser.add_argument("--codec")
@@ -194,8 +198,10 @@ def main(argv=None):
     parser.add_argument("--prefix")
     parser.add_argument("--nvidia-wine", help="the NVIDIA driver's NGX DLLs for Wine")
     args = parser.parse_args(argv)
-    if bool(args.b_generator) != bool(args.b_dll):
-        parser.error("--b-generator and --b-dll go together")
+    if not args.dll and args.generator != "recorded":
+        parser.error("--dll is needed (but for --generator recorded)")
+    if args.b_generator and not args.b_dll and args.b_generator != "recorded":
+        parser.error("--b-generator needs --b-dll (but for recorded)")
     if not args.video and not args.raw:
         parser.error("nothing to write: give --video and/or --raw")
 
@@ -206,7 +212,7 @@ def main(argv=None):
     if args.b_generator:
         sides.append(("b", args.b_generator, args.b_dll, args.b_label))
     for _, generator, _, _ in sides:
-        if generator == "nvidia":
+        if generator in ("nvidia", "dlss", "dlssd"):
             wine.setup_nvidia(args.nvidia_wine)
     args.out.mkdir(parents=True, exist_ok=True)
     video_options = []

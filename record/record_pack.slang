@@ -1,10 +1,13 @@
-// The GPU coding of nr-record (FORMAT.md "Coding 3"), compiled to DXIL for D3D12 (d3d12_packer.cpp) and run on the
-// game's command list: per real frame record_init, then record_pack once per texture, then record_done.
+// The GPU coding of nr-record (FORMAT.md "Coding 3"), compiled to DXIL for D3D12 (d3d12_packer.cpp) and to SPIR-V for
+// Vulkan (vulkan_ring.cpp, with REC_COUNTER) and run on the game's command list or buffer: per real frame
+// record_init, then record_pack once per texture, then record_done.
 // - record_init: word 0 of the slot (the next free word) starts at the slot's data start.
 // - record_pack: one texture of the frame into chunks of words; word 0 allocates each chunk's words, and the texture's
 //   chunk table (rp.table) gets each chunk's first word and word count.
-// - record_done: the used word count and the frame's serial into the status buffer, which the host copies to memory
-//   it reads to see that the frame's pack has finished.
+// - record_done: the used word count and the frame's serial into the status buffer, which the host reads (D3D12: from
+//   a copy in memory) to see that the frame's pack has finished.
+// With REC_COUNTER (Vulkan, whose slots are in host memory) the next free word is record_counter[rp.slot] in device
+// memory instead of word 0, and record_done writes it to word 0.
 
 struct RecordParams
 {
@@ -14,14 +17,18 @@ struct RecordParams
     uint table;          // the slot word of the texture's chunk table
     uint channels;       // 1 to 4
     uint value;          // record_init: the data start; record_done: the frame's serial
-    uint slot;           // record_done: the slot's status entry
+    uint slot;           // record_done (and with REC_COUNTER all three): the slot's status entry
 };
-ConstantBuffer<RecordParams> rp : register(b0);
+// Vulkan: push constants and set 0's bindings 0 to 4 (D3D12 takes the registers).
+[[vk::push_constant]] ConstantBuffer<RecordParams> rp : register(b0);
 
-Texture2D<float4> src : register(t0);   // the texture (a depth format's depth plane in x)
-Texture2D<float4> src2 : register(t1);  // with REC_REFERENCE: the texture it is coded against
-RWStructuredBuffer<uint> record_slot : register(u0);
-RWStructuredBuffer<uint> record_status : register(u1);  // per slot: used words, serial
+[[vk::binding(0, 0)]] Texture2D<float4> src : register(t0);   // the texture (a depth format's depth plane in x)
+[[vk::binding(1, 0)]] Texture2D<float4> src2 : register(t1);  // with REC_REFERENCE: the texture it is coded against
+[[vk::binding(2, 0)]] RWStructuredBuffer<uint> record_slot : register(u0);
+[[vk::binding(3, 0)]] RWStructuredBuffer<uint> record_status : register(u1);  // per slot: used words, serial
+#ifdef REC_COUNTER
+[[vk::binding(4, 0)]] RWStructuredBuffer<uint> record_counter;  // per slot: the next free word
+#endif
 
 float3 linear_to_srgb(float3 l)
 {
@@ -33,14 +40,24 @@ float3 linear_to_srgb(float3 l)
 [numthreads(1, 1, 1)]
 void record_init(uint3 id : SV_DispatchThreadID)
 {
+#ifdef REC_COUNTER
+    record_counter[rp.slot] = rp.value;
+#else
     record_slot[0] = rp.value;
+#endif
 }
 
 [shader("compute")]
 [numthreads(1, 1, 1)]
 void record_done(uint3 id : SV_DispatchThreadID)
 {
+#ifdef REC_COUNTER
+    const uint used = record_counter[rp.slot];
+    record_slot[0] = used;
+    record_status[2 * rp.slot] = used;
+#else
     record_status[2 * rp.slot] = record_slot[0];
+#endif
     record_status[2 * rp.slot + 1] = rp.value;
 }
 
@@ -275,7 +292,11 @@ void record_pack(uint3 group : SV_GroupID, uint gi : SV_GroupIndex)
     if (gi == 0)
     {
         uint base;
+#ifdef REC_COUNTER
+        InterlockedAdd(record_counter[rp.slot], total, base);
+#else
         InterlockedAdd(record_slot[0], total, base);
+#endif
         rec_base = base;
         const uint entry = rp.table + 2 * (ty * chunks + cx);
         record_slot[entry] = base;

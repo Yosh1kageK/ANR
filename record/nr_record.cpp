@@ -3,7 +3,7 @@
 //   nr-record info DIR                          # format, source, textures, frames, calls, gaps
 //   nr-record decode DIR --frame N --out OUT    # recorded real frame N's textures as raw texels, OUT/f<N>_<role>.bin
 //   nr-record verify DIR                        # decodes every frame: the folder is complete and consistent
-//   nr-record params DIR [--call K]             # call K's parameters by name and, for FG, in FORMAT.md's units
+//   nr-record params DIR [--call K]             # call K's parameters by name and, for FG, SR and RR, in FORMAT.md's units
 
 #include <algorithm>
 #include <chrono>
@@ -142,8 +142,11 @@ int main(int argc, char** argv) {
                             {"values", values}};
         record::FgCall fg;
         std::string why;
+        record::SrCall sr;
         if (record::Fg(rec, c, fg, why))
             j["fg"] = record::ToJson(fg);
+        else if (record::Sr(rec, c, sr, why))
+            j[rec.feature] = record::ToJson(sr);
         std::printf("%s\n", j.dump().c_str());
         return 0;
     }

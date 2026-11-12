@@ -11,7 +11,8 @@
 //   if (std::string why = r->Due(); !why.empty()) r->Stop(why);
 //   ... once r->finished(): r.reset()
 //
-// Windows (D3D12 ring and copy queue), natively or under Wine. The source's thread calls Frame, Call, Stop and Due.
+// Windows (a D3D12 ring and copy queue, or a Ring of another API), natively or under Wine. The source's thread calls
+// Frame, Call, Stop and Due.
 #pragma once
 
 #include <d3d12.h>
@@ -54,6 +55,26 @@ public:
     virtual int Done(uint32_t slot, uint64_t& bytes, double& gpu_ms, ID3D12Fence*& fence, uint64_t& fence_value) = 0;
     // Whether another device writes the slot buffers (D3D12_HEAP_FLAG_SHARED).
     virtual bool SharedSlots() const = 0;
+};
+
+// The ring's GPU side in one graphics API: the slot buffers, the packs into them on the source's command lists, and
+// each finished slot in memory for the workers. Start with a D3D12 device and a Packer makes D3D12's (slots in device
+// memory, copied on the recorder's copy queue); VulkanRing (vulkan_ring.h) is Vulkan's.
+class Ring {
+public:
+    virtual ~Ring() = default;
+    virtual bool Describe(const void* texture, Channels& out, std::string& error) = 0;
+    // `slots` (up to MAX_SLOTS) slot buffers of `bytes` each, once per recording before its first Pack.
+    virtual bool Create(unsigned slots, uint64_t bytes, std::string& error) = 0;
+    // As Packer::Pack, into slot's buffer.
+    virtual bool Pack(void* list, uint32_t slot, uint32_t data_start, const std::vector<Packer::Texture>& textures,
+                      std::string& error) = 0;
+    // As Packer::Done, without the fence.
+    virtual int Done(uint32_t slot, uint64_t& bytes, double& gpu_ms) = 0;
+    // The copier thread, once Done gave 1: the slot's first `bytes` in memory until Release(slot) (copied there, which
+    // it waits for, or mapped), or null and why.
+    virtual const uint8_t* Read(uint32_t slot, uint64_t bytes, std::string& error) = 0;
+    virtual void Release(uint32_t slot) = 0;
 };
 
 // A texture role the source may give, in the order the slot codes them (FORMAT.md lists the roles per feature).
@@ -109,6 +130,10 @@ public:
     static std::unique_ptr<Recorder> Start(ID3D12Device* device, std::shared_ptr<Packer> packer, const Config& config,
                                            const Session& session, const std::vector<InputDesc>& inputs,
                                            const std::vector<Input>& first, std::string& error);
+    // The same on another graphics API's ring.
+    static std::unique_ptr<Recorder> Start(std::shared_ptr<Ring> ring, const Config& config, const Session& session,
+                                           const std::vector<InputDesc>& inputs, const std::vector<Input>& first,
+                                           std::string& error);
     ~Recorder();
 
     // Each real frame: its inputs (InputDesc order) into the next ring slot, or a dropped frame if the ring is full.

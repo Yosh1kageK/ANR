@@ -62,7 +62,7 @@ bool Open(const std::string& dir, Recording& r, std::string& error) {
         Channels c;
         c.channels = x.channels;
         c.kinds = x.kinds;
-        x.texel = TexelBytes(c, x.vk == vk::A2B10G10R10_UNORM_PACK32);
+        x.texel = x.vk == vk::B10G11R11_UFLOAT_PACK32 ? 4 : TexelBytes(c, x.vk == vk::A2B10G10R10_UNORM_PACK32);
         r.textures.push_back(x);
     }
     for (const auto& p : r.meta.value("parameters", nlohmann::json::array()))
@@ -404,6 +404,14 @@ bool Decode(Recording& r, const IndexRecord& ix, Pool& pool, DecodeScratch& s,
                        v[3][p0 + p] << 30;
             return;
         }
+        if (x.vk == vk::B10G11R11_UFLOAT_PACK32) {  // coded as FP16: the top 11, 11 and 10 bits of each half
+            uint32_t* o = (uint32_t*)row;
+            auto half = [](uint32_t v) { return (v ^ ((v & 0x8000) ? 0x8000u : 0xFFFFu)) & 0xFFFF; };
+            for (size_t p = 0; p < w; p++)
+                o[p] = (half(v[0][p0 + p]) >> 4 & 0x7FF) | (half(v[1][p0 + p]) >> 4 & 0x7FF) << 11 |
+                       (half(v[2][p0 + p]) >> 5 & 0x3FF) << 22;
+            return;
+        }
         size_t offset = 0;
         for (uint32_t c = 0; c < x.channels; c++) {
             const uint32_t kind = (x.kinds >> (8 * c)) & 0xFF, type = kind >> 5;
@@ -554,6 +562,97 @@ nlohmann::json ToJson(const FgCall& c) {
     if (c.has_prev_clip_to_clip) j["prev_clip_to_clip"] = v(c.prev_clip_to_clip, 16);
     if (c.has_view_to_clip) j["view_to_clip"] = v(c.view_to_clip, 16);
     if (c.has_clip_to_view) j["clip_to_view"] = v(c.clip_to_view, 16);
+    return j;
+}
+
+bool Sr(const Recording& r, const Call& call, SrCall& out, std::string& error) {
+    if ((r.feature != "sr" && r.feature != "rr") || r.parameter_source != "ngx") {
+        error = "no SR view of " + r.feature + " parameters from " + r.parameter_source;
+        return false;
+    }
+    out = {};
+    out.frame = call.frame;
+    const nlohmann::json create = r.meta.value("create", nlohmann::json::object());
+    auto u = [&](const char* name, uint32_t fallback = 0) {
+        uint32_t v = fallback;
+        if (!r.Unsigned(call, name, v) && create.contains(name) && create[name].contains("u"))
+            v = create[name]["u"].get<uint32_t>();
+        return v;
+    };
+    auto f = [&](const char* name, float fallback = 0) {
+        float v = fallback;
+        if (!r.Float(call, name, v) && create.contains(name) && create[name].contains("f"))
+            v = create[name]["f"].get<float>();
+        return v;
+    };
+    // NGX DLSS feature flags (nvsdk_ngx_defs.h NVSDK_NGX_DLSS_Feature_Flags).
+    out.create_flags = u("DLSS.Feature.Create.Flags");
+    out.hdr = out.create_flags & 1;
+    out.motion_low_res = out.create_flags & 2;
+    out.motion_jittered = out.create_flags & 4;
+    out.depth_inverted = out.create_flags & 8;
+    out.sharpening = out.create_flags & 32;
+    out.auto_exposure = out.create_flags & 64;
+    out.quality = u("PerfQualityValue");
+    static const char* const PRESETS[] = {"DLAA", "Quality", "Balanced", "Performance", "UltraPerformance",
+                                          "UltraQuality"};
+    static const uint32_t QUALITIES[] = {5, 2, 1, 0, 3, 4};  // NVSDK_NGX_PerfQuality_Value of each preset hint
+    for (int i = 0; i < 6; i++)
+        if (QUALITIES[i] == out.quality)
+            out.preset = u((std::string("DLSS.Hint.Render.Preset.") + PRESETS[i]).c_str());
+    out.reset = u("Reset") != 0;
+    out.jitter[0] = f("Jitter.Offset.X");
+    out.jitter[1] = f("Jitter.Offset.Y");
+    out.motion_scale[0] = f("MV.Scale.X", 1);
+    out.motion_scale[1] = f("MV.Scale.Y", 1);
+    out.render_size[0] = u("DLSS.Render.Subrect.Dimensions.Width", u("Width"));
+    out.render_size[1] = u("DLSS.Render.Subrect.Dimensions.Height", u("Height"));
+    out.output_size[0] = u("OutWidth", r.meta.value("width", 0u));
+    out.output_size[1] = u("OutHeight", r.meta.value("height", 0u));
+    out.pre_exposure = f("DLSS.Pre.Exposure", 1);
+    out.exposure_scale = f("DLSS.Exposure.Scale", 1);
+    out.sharpness = f("Sharpness");
+    out.near_plane = f("FSR.cameraNear");
+    out.far_plane = f("FSR.cameraFar");
+    out.fov = f("FSR.cameraFovAngleVertical");
+    out.frame_time_ms = f("FrameTimeDeltaInMsec", f("FSR.frameTimeDelta"));
+    out.color_base[0] = u("DLSS.Input.Color.Subrect.Base.X");
+    out.color_base[1] = u("DLSS.Input.Color.Subrect.Base.Y");
+    out.depth_base[0] = u("DLSS.Input.Depth.Subrect.Base.X");
+    out.depth_base[1] = u("DLSS.Input.Depth.Subrect.Base.Y");
+    out.motion_base[0] = u("DLSS.Input.MV.Subrect.Base.X");
+    out.motion_base[1] = u("DLSS.Input.MV.Subrect.Base.Y");
+    out.output_base[0] = u("DLSS.Output.Subrect.Base.X");
+    out.output_base[1] = u("DLSS.Output.Subrect.Base.Y");
+    out.denoise_mode = u("DLSS.Denoise.Mode");
+    out.roughness_mode = u("DLSS.Roughness.Mode");
+    if (const float* m = r.Matrix(call, "WorldToViewMatrix")) {
+        std::memcpy(out.world_to_view, m, 64);
+        out.has_world_to_view = true;
+    }
+    if (const float* m = r.Matrix(call, "ViewToClipMatrix")) {
+        std::memcpy(out.view_to_clip, m, 64);
+        out.has_view_to_clip = true;
+    }
+    return true;
+}
+
+nlohmann::json ToJson(const SrCall& c) {
+    auto v = [](const auto* p, int n) { return std::vector<std::decay_t<decltype(*p)>>(p, p + n); };
+    nlohmann::json j = {
+        {"frame", c.frame}, {"reset", c.reset}, {"hdr", c.hdr}, {"depth_inverted", c.depth_inverted},
+        {"motion_jittered", c.motion_jittered}, {"motion_low_res", c.motion_low_res},
+        {"auto_exposure", c.auto_exposure}, {"sharpening", c.sharpening}, {"create_flags", c.create_flags},
+        {"quality", c.quality}, {"preset", c.preset}, {"jitter", v(c.jitter, 2)},
+        {"motion_scale", v(c.motion_scale, 2)}, {"render_size", v(c.render_size, 2)},
+        {"output_size", v(c.output_size, 2)}, {"pre_exposure", c.pre_exposure},
+        {"exposure_scale", c.exposure_scale}, {"sharpness", c.sharpness}, {"near", c.near_plane},
+        {"far", c.far_plane}, {"fov", c.fov}, {"frame_time_ms", c.frame_time_ms},
+        {"color_base", v(c.color_base, 2)}, {"depth_base", v(c.depth_base, 2)},
+        {"motion_base", v(c.motion_base, 2)}, {"output_base", v(c.output_base, 2)},
+        {"denoise_mode", c.denoise_mode}, {"roughness_mode", c.roughness_mode}};
+    if (c.has_world_to_view) j["world_to_view"] = v(c.world_to_view, 16);
+    if (c.has_view_to_clip) j["view_to_clip"] = v(c.view_to_clip, 16);
     return j;
 }
 

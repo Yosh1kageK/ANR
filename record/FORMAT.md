@@ -96,33 +96,52 @@ Per real frame (each generated frame's two endpoints are real frames), one param
 
 ### SR: super resolution
 
-Per real frame, one call. Recorders for SR are not released yet; this is what they write.
+Per real frame, one call: the upscaler's evaluation. From `ngx-dlss` (OptiScaler's DLSS interface, which also carries games' FSR and XeSS inputs after OptiScaler's translation):
 
-| Role | What |
-|---|---|
-| `color` | The frame at render size, before upscaling. Required |
-| `depth`, `motion` | As for FG, at render size. Required |
-| `exposure` | 1 x 1 exposure, where given |
-| `reactive` | FSR's reactive mask, or another source's equivalent |
-| `transparency` | FSR's transparency and composition mask |
-| `bias` | DLSS's bias-current-color mask |
-| `output` | The source's own upscaled result, for comparison (recorded after its call) |
+| Role | NGX parameter | What |
+|---|---|---|
+| `color` | `Color` | The frame at render size, before upscaling. Required |
+| `depth` | `Depth` | Depth as rendered. Required |
+| `motion` | `MotionVectors` | Motion vectors. Required |
+| `exposure` | `ExposureTexture` | 1 x 1 exposure, where given |
+| `reactive` | `FSR.reactive` | FSR's reactive mask (OptiScaler's name; XeSS's responsive mask arrives here too) |
+| `transparency` | `FSR.transparencyAndComposition` | FSR's transparency and composition mask |
+| `transparency_mask` | `TransparencyMask` | DLSS's transparency mask |
+| `bias` | `DLSS.Input.Bias.Current.Color.Mask` | DLSS's bias-current-color mask |
+| `output` | `Output` | The source's own upscaled result for this call, recorded after it |
 
-Typed parameters: `jitter`, `motion_scale`, `render_size`, `output_size`, `reset`, `pre_exposure`, `exposure_scale`, `sharpness`, `near`, `far`, `fov`, `depth_inverted`, `hdr`, `motion_jittered`, `frame_time`.
+`record.json` adds `create`: the feature's creation parameters by name, each `{"u": ..., "f": ...}` as read (as in `params.bin`), and `forward`: what produced `output` (for example `nvidia`).
+
+`reader.h` `Sr` gives a call's parameters in one convention:
+
+| Field | NGX parameter | What |
+|---|---|---|
+| `reset` | `Reset` | The history is invalid |
+| `jitter` | `Jitter.Offset.X`, `Y` | Render pixels |
+| `motion_scale` | `MV.Scale.X`, `Y` | The stored motion times this is in render pixels |
+| `render_size` | `DLSS.Render.Subrect.Dimensions.Width`, `Height`, else `Width`, `Height` | The part of the inputs in use |
+| `output_size` | `OutWidth`, `OutHeight` | The output's size |
+| `create_flags`, `hdr`, `motion_low_res`, `motion_jittered`, `depth_inverted`, `sharpening`, `auto_exposure` | `DLSS.Feature.Create.Flags` | NGX's DLSS feature flags (bits 0, 1, 2, 3, 5, 6) |
+| `quality`, `preset` | `PerfQualityValue`, `DLSS.Hint.Render.Preset.<mode>` | The quality mode and the render preset hint for it |
+| `pre_exposure`, `exposure_scale`, `sharpness` | `DLSS.Pre.Exposure`, `DLSS.Exposure.Scale`, `Sharpness` | |
+| `near`, `far`, `fov` | `FSR.cameraNear`, `FSR.cameraFar`, `FSR.cameraFovAngleVertical` | Given by FSR games only (0: not given) |
+| `frame_time_ms` | `FrameTimeDeltaInMsec`, else `FSR.frameTimeDelta` | |
+| `*_base` | `DLSS.Input.Color.Subrect.Base.X` ... `DLSS.Output.Subrect.Base.Y` | The corner of the part in use |
+
+A value the call does not carry comes from `create`.
 
 ### RR: ray reconstruction
 
-As SR, with the guide buffers of the denoiser. Recorders for RR are not released yet.
+As SR (`ngx-dlssd`), with the guide buffers of the denoiser:
 
-| Role | What |
+| Role | NGX parameter |
 |---|---|
-| `color`, `depth`, `motion`, `exposure`, `bias`, `output` | As for SR |
-| `diffuse_albedo`, `specular_albedo` | Albedos |
-| `normals`, `roughness` | Normals (with roughness in a channel where the source packs it so) and roughness |
-| `specular_hit_distance`, `specular_motion` | Specular hit distance and specular motion vectors |
-| `transparency_layer` | Transparent surfaces composited after denoising, where given |
+| `diffuse_albedo`, `specular_albedo` | `DLSS.Input.DiffuseAlbedo`, `DLSS.Input.SpecularAlbedo` |
+| `normals`, `roughness` | `GBuffer.Normals`, `GBuffer.Roughness` (with `DLSS.Roughness.Mode` 1 the roughness is in the normals' w) |
+| `specular_hit_distance`, `specular_motion` | `DLSSD.SpecularHitDistance`, `GBuffer.SpecularMvec` |
+| `transparency_layer` | `DLSS.TransparencyLayer` |
 
-Other guide buffers keep the source's name as their role.
+Other guide buffers keep their NGX name as their role (for example `DLSSD.DiffuseHitDistance`, `DLSS.TransparencyLayerOpacity`). `Sr` adds `denoise_mode`, `roughness_mode` (`DLSS.Denoise.Mode`, `DLSS.Roughness.Mode`), and the matrices `WorldToViewMatrix` and `ViewToClipMatrix` as given.
 
 ## frames.idx
 
@@ -155,7 +174,7 @@ Per call, in call order: a 32-byte header (`NRP1`, u32 index, u32 count, u32 fla
 
 A real frame's words (u32). Word 0 is the number of words used. Each texture's chunk table starts at its `table` word: 2 words (the chunk's first word and its word count) per chunk, where a chunk is up to 32 tiles of 8 x 8 texels along a tile row, tile rows from the top. Chunks start at `data_start` or later, in any order (the GPU allocates them as it goes).
 
-**Values.** A channel's values are integers of its width: UNORM codes as they are; FP16 and FP32 bits mapped to an order-preserving integer (negative values: all bits flipped; others: the sign bit set). An sRGB texture's codes are the stored sRGB codes. A depth format's depth plane is FP32. Decoded texels (`reader.h` `Decode`) are the stored texels, channels in RGBA order: BGRA8 formats decode as RGBA8, and a depth-stencil format as its D32 depth plane.
+**Values.** A channel's values are integers of its width: UNORM codes as they are; FP16 and FP32 bits mapped to an order-preserving integer (negative values: all bits flipped; others: the sign bit set). An sRGB texture's codes are the stored sRGB codes. A depth format's depth plane is FP32. Decoded texels (`reader.h` `Decode`) are the stored texels, channels in RGBA order: BGRA8 formats decode as RGBA8, and a depth-stencil format as its D32 depth plane. R11G11B10 floats (`vk_format` 122) are coded as 3 FP16 channels (each 11- or 10-bit float is exactly an FP16 value) and decode to their packed 32-bit words.
 
 ### Coding 3
 

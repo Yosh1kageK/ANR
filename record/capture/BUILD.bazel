@@ -1,12 +1,12 @@
 load("@rules_cc//cc:defs.bzl", "cc_binary")
 
 # The capture DLL (capture.cpp, README.md): an NGX frame generation feature that OptiScaler loads as a custom DLSS-G
-# provider and that records the game's frame generation inputs. Windows x64:
+# provider and that records the game's frame generation inputs, in D3D12 and Vulkan games. Windows x64:
 # bazel build --config=windows_cross //record/capture:package
 
 cc_binary(
     name = "nvngx_dlssg.dll",
-    srcs = ["capture.cpp"],
+    srcs = ["capture.cpp", "log_file.h"],
     linkopts = [
         "d3d12.lib",
         "user32.lib",
@@ -16,11 +16,42 @@ cc_binary(
     deps = [
         "//record:d3d12_packer",
         "//record:recorder",
+        "//record:vulkan_ring",
         "@dlss//:headers",
+        "@vulkan_headers",
     ],
 )
 
-# What goes into OptiScaler/custom/nr-record/dlssg/: the DLL, kernels/ (the three DXIL kernels) and nr_record.ini.
+# The SR and RR capture DLL (sr_capture.cpp): an NGX runtime that OptiScaler loads as a custom DLSS upscaler, which
+# records the upscaler inputs OptiScaler hands it from the game's DLSS, FSR or XeSS calls. Not named nvngx.dll, which
+# NVIDIA's NGX core and OptiScaler look up by name.
+cc_binary(
+    name = "nr_record_sr.dll",
+    srcs = ["sr_capture.cpp", "log_file.h"],
+    linkopts = [
+        "d3d12.lib",
+        "user32.lib",
+    ],
+    linkshared = True,
+    target_compatible_with = ["@platforms//os:windows"],
+    deps = [
+        "//record:d3d12_packer",
+        "//record:ffx_upscaler",
+        "//record:format",
+        "//record:reader",
+        "//record:recorder",
+        "//record:xess_upscaler",
+        "@dlss//:headers",
+        "@nlohmann_json//:json",
+    ],
+)
+
+# What goes into OptiScaler/custom/nr-record/: dlssg/ with nvngx_dlssg.dll, kernels/ (the three DXIL kernels for D3D12
+# games and the three SPIR-V kernels for Vulkan games) and nr_record.ini; dlss/ with nr_record_sr.dll, kernels/ (the
+# DXIL kernels), nr_record_sr.ini as nr_record.ini, and amd/ with FidelityFX SDK 1.1.4's amd_fidelityfx_dx12.dll as
+# nr_record_ffx_dx12.dll (the ffx forward; under AMD's name OptiScaler would take it over) and its license.md as
+# AMD_FidelityFX_license.md, which its redistribution requires. dlss/ holds no other DLL: OptiScaler loads the first
+# DLL there as the runtime.
 filegroup(
     name = "package",
     srcs = [
@@ -28,10 +59,32 @@ filegroup(
         "install.ps1",
         "install.sh",
         "nr_record.ini",
+        "nr_record_sr.ini",
         "uninstall.cmd",
         "uninstall.ps1",
         "uninstall.sh",
+        ":nr_record_sr.dll",
         ":nvngx_dlssg.dll",
         "//record:kernels",
+        "//record:kernels_vk",
+        "@fsr_sdk//:fsr31_dx12",
+    ],
+)
+
+# A synthetic game that calls an NGX DLL's DLSS (or DLSS-RR) per frame and presses the record key: the SR capture
+# DLL's check, directly or through OptiScaler (README.md "Checking it").
+cc_binary(
+    name = "nr-sr-host",
+    srcs = ["sr_host.cpp"],
+    linkopts = [
+        "d3d12.lib",
+        "dxgi.lib",
+        "user32.lib",
+    ],
+    target_compatible_with = ["@platforms//os:windows"],
+    deps = [
+        "//record/replay:ngx_common",
+        "@dlss//:headers",
+        "@nlohmann_json//:json",
     ],
 )

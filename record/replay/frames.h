@@ -49,7 +49,7 @@ bool ReadRaw(const std::string& path, Image& image, std::string& error);
 // at the end.
 struct StreamFrame {
     char magic[4] = {'N', 'R', 'S', 'F'};
-    uint32_t kind = 0;          // 0 real, 1 generated
+    uint32_t kind = 0;          // 0 real, 1 generated, 2 an SR or RR output (of recorded frame a = b)
     uint32_t a = 0, b = 0;      // the real frames it lies between (a real frame: a = b)
     uint32_t index = 0;         // the generated frame's index (1 to multiplier - 1); 0 for a real frame
     float t = 0;                // index / multiplier; 0 for a real frame
