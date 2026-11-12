@@ -13,7 +13,7 @@
 - **ANR SR**: super resolution (upscaling). Beta soon.
 - **ANR RR**: ray reconstruction (denoising for ray tracing). Beta soon.
 - **Source code**: coming soon.
-- **nr-record**: records a game's frame generation inputs and compares ANR FG, NVIDIA DLSS-G and others on the same frames ([below](#record-and-compare-frame-generation)). Its source is in this repository.
+- **nr-record**: records a game's frame generation inputs to compare ANR FG, NVIDIA DLSS-G and others ([below](#record-and-compare-frame-generation)). Source in this repository.
 
 ## ANR FG Beta
 
@@ -47,17 +47,21 @@ OptiScaler is GPL-3.0; its source for each release is attached to the release.
 
 ## Record and compare frame generation
 
-**nr-record** records what a game gives its frame generation while you play, losslessly. Then it runs other frame generation on exactly those frames, offline, so that you can compare ANR FG, NVIDIA DLSS frame generation and others frame by frame: as videos, side by side, or as still images. It ships no frame generation: you point it at the DLLs you have (an ANR FG release, the `nvngx_dlssg.dll` of a game).
+nr-record records the inputs a game gives its frame generation, losslessly. You can then replay a recording through any frame generation DLL you have (ANR FG, a game's DLSS-G `nvngx_dlssg.dll`) and compare the results as videos or images. nr-record includes no frame generation.
 
-You need a D3D12 game with DLSS frame generation and the ANR FG package (`anr-fg-full`, which brings OptiScaler) installed in it, Windows 10 or 11 or Linux with Proton, and [ffmpeg](https://ffmpeg.org/download.html) with ffprobe on the `PATH` for videos and images. Replaying NVIDIA's DLSS-G needs an NVIDIA RTX 40 or 50 series GPU.
+Requirements:
+- a D3D12 game with DLSS frame generation, with the `anr-fg-full` package installed (it includes OptiScaler);
+- Windows 10 or 11, or Linux with Proton;
+- [ffmpeg](https://ffmpeg.org/download.html) and ffprobe on the `PATH`;
+- for DLSS-G replays, an NVIDIA RTX 40 or 50 series GPU.
 
-1. **Install.** Download `nr-record-1.0-windows.zip` (or `-linux.tar.gz`) from the [FG-V.B14 release](../../releases/tag/FG-V.B14) and extract it. Close the game and run the installer with the folder of the game's `.exe`:
-   - Windows: `install.cmd "<folder>"`. Windows needs no launch option.
-   - Linux and Steam Deck (Proton): `sh install.sh "<folder>"`. Under Proton only, the game's Steam launch options need `WINEDLLOVERRIDES="dxgi=n,b" %command%` (the ANR FG installer prints the same line); do not set it on Windows (a game with it set there may not start).
+1. **Install.** Download `nr-record-1.0-windows.zip` or `nr-record-1.0-linux.tar.gz` from the [FG-V.B14 release](../../releases/tag/FG-V.B14) and extract it. Close the game and run the installer with the folder of the game's `.exe`:
+   - Windows: `install.cmd "<folder>"`. No launch option is needed.
+   - Linux and Steam Deck (Proton): `sh install.sh "<folder>"`. Set the game's Steam launch options to `WINEDLLOVERRIDES="dxgi=n,b" %command%` (the ANR FG installer prints the same line). Do not set this on Windows: the game may not start.
 
-   It copies `nr-record` into the game's `OptiScaler/custom/` folder, sets `FGNvngxReplacement=nr-record` in `OptiScaler.ini` (keeping the original), and lets ANR FG generate the frames when you are not recording (NVIDIA's DLSS-G where ANR FG is not installed: `forward` in `nr-record/dlssg/nr_record.ini`). `uninstall.cmd` or `sh uninstall.sh` with the same folder restores `OptiScaler.ini` and removes it. By hand: copy `capture/OptiScaler/custom/nr-record` into `OptiScaler/custom/`, set `FGNvngxReplacement=nr-record`, and set `forward` to `..\..\Apex Neural Rendering FG\dlssg\nvngx_dlssg.dll` or `nvidia`.
-2. **Record.** In the game, with DLSS frame generation on: **F6** starts and stops a recording, **F9** records the next 8 frames. A beep marks each start and stop; the game shows its real frames only while it records. Recordings go to `%LOCALAPPDATA%\nr-record\` on Windows and `~/.local/share/nr-record/` under Proton; a frame takes about 26 MB at 3840x2160 and about 6 MB at 1806x972. `nr_record.log` in the `nr-record/dlssg` folder says what was recorded.
-3. **Replay and make videos.** On Windows, in the package folder (`REC`: a recording's folder):
+   The installer copies `nr-record` into `OptiScaler/custom/` and sets `FGNvngxReplacement=nr-record` in `OptiScaler.ini` (it keeps the original). When you are not recording, ANR FG generates the frames, or DLSS-G if ANR FG is not installed (`forward` in `nr-record/dlssg/nr_record.ini`). `uninstall.cmd` or `sh uninstall.sh` with the same folder removes nr-record and restores `OptiScaler.ini`. To install by hand: copy `capture/OptiScaler/custom/nr-record` into `OptiScaler/custom/`, set `FGNvngxReplacement=nr-record`, and set `forward` to `..\..\Apex Neural Rendering FG\dlssg\nvngx_dlssg.dll` or `nvidia`.
+2. **Record.** Turn on DLSS frame generation in the game. **F6** starts and stops a recording; **F9** records the next 8 frames. Each start and stop beeps. While recording, the game shows only real frames. Recordings go to `%LOCALAPPDATA%\nr-record\` (Windows) or `~/.local/share/nr-record/` (Proton). A frame takes about 26 MB at 3840x2160 and 6 MB at 1806x972. `nr-record/dlssg/nr_record.log` lists what was recorded.
+3. **Replay.** On Windows, in the package folder (`REC` is a recording's folder):
 
    ```bat
    tools\nr-record.exe info REC
@@ -66,7 +70,7 @@ You need a D3D12 game with DLSS frame generation and the ANR FG package (`anr-fg
    tools\nr-video.exe project out\anr.mp4 out\dlssg.mp4 --out out\cmp.compare.json --labels "ANR FG" DLSS-G
    ```
 
-   On Linux, `tools/nr_replay_wine.py` runs both replays under Proton's Wine and writes both videos, a side-by-side video and the compare project:
+   On Linux, one command runs both replays under Proton's Wine and writes both videos, a side-by-side video and the compare project:
 
    ```bash
    python3 tools/nr_replay_wine.py --record REC --out cmp --video \
@@ -74,10 +78,12 @@ You need a D3D12 game with DLSS frame generation and the ANR FG package (`anr-fg
        --b-generator nvidia --b-dll "<game>/nvngx_dlssg.dll" --b-label DLSS-G
    ```
 
-   Replays with `--raw` instead of `--stream` keep each frame, and `nr-video png` writes chosen frames as PNG images.
-4. **Compare.** `viewer/renderer --compare --project cmp/compare.json` (on Windows `viewer\renderer.exe --compare --project out\cmp.compare.json`) plays both videos in lockstep with a divider, side by side, pixel zoom and marks, and exports videos and images (`--compare-export PROJECT --out FILE --very-high` from the command line). `viewer/renderer --captures` browses your recordings and recreates their frames with each generator.
+   For images, replay with `--raw` instead of `--stream` and run `nr-video png`.
+4. **Compare.** `viewer/renderer --compare --project cmp/compare.json` (Windows: `viewer\renderer.exe --compare --project out\cmp.compare.json`) plays both videos in sync, with a divider, side by side view, pixel zoom and marks, and exports videos and images. From the command line: `--compare-export PROJECT --out FILE --very-high`. `viewer/renderer --captures` lists your recordings and regenerates their frames with each generator.
 
-Not yet: Vulkan games, super resolution and ray reconstruction, AMD FSR and Intel XeSS frame generation as replay generators. [record/README.md](record/README.md) has how recording works, [record/FORMAT.md](record/FORMAT.md) the recording format, [record/replay/README.md](record/replay/README.md) the replay and video tools, and [renderer/README.md](renderer/README.md) the viewer. To build from source: `bazel build //record:nr-record //record/replay:nr-video //renderer`, and `bazel build --config=windows_cross //record/capture:package //record/replay:nr-replay` for the Windows parts.
+Not supported yet: Vulkan games, super resolution and ray reconstruction, and AMD FSR and Intel XeSS frame generation as replay generators.
+
+Docs: [record/README.md](record/README.md) (how recording works), [record/FORMAT.md](record/FORMAT.md) (format), [record/replay/README.md](record/replay/README.md) (replay and video tools), [renderer/README.md](renderer/README.md) (viewer). Build from source: `bazel build //record:nr-record //record/replay:nr-video //renderer`; for the Windows parts, `bazel build --config=windows_cross //record/capture:package //record/replay:nr-replay`.
 
 ## Citation
 
