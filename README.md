@@ -13,7 +13,7 @@
 - **ANR SR**: super resolution (upscaling). Beta soon.
 - **ANR RR**: ray reconstruction (denoising for ray tracing). Beta soon.
 - **Source code**: coming soon.
-- **nr-record**: records a game's frame generation inputs to compare ANR FG, NVIDIA DLSS-G and others ([below](#record-and-compare-frame-generation)). Source in this repository.
+- **nr-record**: records a game's frame generation or upscaler inputs to compare ANR FG, NVIDIA DLSS-G, DLSS, FSR, XeSS and others ([below](#record-and-compare-frame-generation)). Source in this repository.
 
 ## ANR FG Beta
 
@@ -50,17 +50,19 @@ OptiScaler is GPL-3.0; its source for each release is attached to the release.
 nr-record records the inputs a game gives its frame generation, losslessly. You can then replay a recording through any frame generation DLL you have (ANR FG, a game's DLSS-G `nvngx_dlssg.dll`) and compare the results as videos or images. nr-record includes no frame generation.
 
 Requirements:
-- a D3D12 game with DLSS frame generation, with the `anr-fg-full` package installed (it includes OptiScaler);
+- a D3D12 or Vulkan game with DLSS frame generation, with the `anr-fg-full` package installed (it includes OptiScaler);
 - Windows 10 or 11, or Linux with Proton;
 - [ffmpeg](https://ffmpeg.org/download.html) and ffprobe on the `PATH`;
 - for DLSS-G replays, an NVIDIA RTX 40 or 50 series GPU.
 
-1. **Install.** Download `nr-record-1.0-windows.zip` or `nr-record-1.0-linux.tar.gz` from the [FG-V.B14 release](../../releases/tag/FG-V.B14) and extract it. Close the game and run the installer with the folder of the game's `.exe`:
+1. **Install.** Download `nr-record-1.1-windows.zip` or `nr-record-1.1-linux.tar.gz` from the [FG-V.B15 release](../../releases/tag/FG-V.B15) and extract it. Close the game and run the installer with the folder of the game's `.exe`:
    - Windows: `install.cmd "<folder>"`. No launch option is needed.
    - Linux and Steam Deck (Proton): `sh install.sh "<folder>"`. Set the game's Steam launch options to `WINEDLLOVERRIDES="dxgi=n,b" %command%` (the ANR FG installer prints the same line). Do not set this on Windows: the game may not start.
 
    The installer copies `nr-record` into `OptiScaler/custom/` and sets `FGNvngxReplacement=nr-record` in `OptiScaler.ini` (it keeps the original). When you are not recording, ANR FG generates the frames, or DLSS-G if ANR FG is not installed (`forward` in `nr-record/dlssg/nr_record.ini`). `uninstall.cmd` or `sh uninstall.sh` with the same folder removes nr-record and restores `OptiScaler.ini`. To install by hand: copy `capture/OptiScaler/custom/nr-record` into `OptiScaler/custom/`, set `FGNvngxReplacement=nr-record`, and set `forward` to `..\..\Apex Neural Rendering FG\dlssg\nvngx_dlssg.dll` or `nvidia`.
-2. **Record.** Turn on DLSS frame generation in the game. **F6** starts and stops a recording; **F9** records the next 8 frames. Each start and stop beeps. While recording, the game shows only real frames. Recordings go to `%LOCALAPPDATA%\nr-record\` (Windows) or `~/.local/share/nr-record/` (Proton). A frame takes about 26 MB at 3840x2160 and 6 MB at 1806x972. `nr-record/dlssg/nr_record.log` lists what was recorded.
+2. **Record.** Turn on DLSS frame generation in the game. **F6** starts and stops a recording; **F9** records the next 8 frames. Each start and stop beeps. While recording, the game shows only real frames. Recordings go to `%LOCALAPPDATA%\nr-record\` (Windows) or `~/.local/share/nr-record/` (Proton). A frame takes about 26 MB at 3840x2160 and 6 MB at 1806x972. `nr-record/dlssg/nr_record-<date>-<time>.log` lists what was recorded.
+
+   To record the upscaler's inputs instead (super resolution, D3D12 games): open OptiScaler's menu (**Insert**), pick `nr-record` in the upscaler list, and press **F6** to start and stop. It upscales with the upscaler `OptiScaler.ini` names (DLSS on NVIDIA, else FSR, or XeSS) and records that output too. Pick your upscaler again afterwards. Replay these recordings with `--generator dlss`, `fsr` or `xess` ([replay](record/replay/README.md#sr-and-rr)).
 3. **Replay.** On Windows, in the package folder (`REC` is a recording's folder):
 
    ```bat
