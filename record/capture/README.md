@@ -4,13 +4,16 @@
 
 ```bash
 bazel build --config=windows_cross //record/capture:package
-# into the game: OptiScaler (dxgi.dll and OptiScaler.ini) beside the game's .exe, and this folder:
-#   <game>/OptiScaler/custom/nr-record/dlssg/nvngx_dlssg.dll
-#   <game>/OptiScaler/custom/nr-record/dlssg/nr_record.ini
-#   <game>/OptiScaler/custom/nr-record/dlssg/kernels/record_pack.slang.record_{init,pack,done}.dxil
 ```
 
-In `OptiScaler.ini` set `FGInput=nvngxfg` and `FGNvngxReplacement=nr-record` (the folder's name). Under Proton set the launch option `WINEDLLOVERRIDES="dxgi=n,b" %command%`. In the game, turn on DLSS frame generation.
+The release packages carry this folder as `capture/` with installers. The game needs OptiScaler first (the ANR FG full package installs it), then:
+
+```bash
+install.cmd "<folder of the game's .exe>"          # Windows
+sh install.sh "<folder of the game's .exe>"        # Linux, games under Proton
+```
+
+The installer copies `nr-record` into the game's `OptiScaler/custom/`, sets `FGNvngxReplacement=nr-record` in `OptiScaler.ini` (keeping the original in `OptiScaler/nr_record_backup`), and sets `forward` to ANR FG where it is installed, else to `nvidia`; a reinstall keeps your `nr_record.ini`. `uninstall.cmd` or `sh uninstall.sh` with the same folder restores `OptiScaler.ini` and removes `nr-record`. Under Proton the game's Steam launch options need `WINEDLLOVERRIDES="dxgi=n,b" %command%` (OptiScaler loads as `dxgi.dll`); on Windows set no launch option. In the game, turn on DLSS frame generation.
 
 | Key | Action |
 |---|---|
