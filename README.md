@@ -81,9 +81,9 @@ Requirements:
    For images, replay with `--raw` instead of `--stream` and run `nr-video png`.
 4. **Compare.** `viewer/renderer --compare --project cmp/compare.json` (Windows: `viewer\renderer.exe --compare --project out\cmp.compare.json`) plays both videos in sync, with a divider, side by side view, pixel zoom and marks, and exports videos and images. From the command line: `--compare-export PROJECT --out FILE --very-high`. `viewer/renderer --captures` lists your recordings and regenerates their frames with each generator.
 
-Not supported yet: Vulkan games, super resolution and ray reconstruction, and AMD FSR and Intel XeSS frame generation as replay generators.
+Docs: [recording](record/README.md), [format](record/FORMAT.md), [replay and videos](record/replay/README.md), [viewer](renderer/README.md).
 
-Docs: [record/README.md](record/README.md) (how recording works), [record/FORMAT.md](record/FORMAT.md) (format), [record/replay/README.md](record/replay/README.md) (replay and video tools), [renderer/README.md](renderer/README.md) (viewer). Build from source: `bazel build //record:nr-record //record/replay:nr-video //renderer`; for the Windows parts, `bazel build --config=windows_cross //record/capture:package //record/replay:nr-replay`.
+Build: `bazel build //record:nr-record //record/replay:nr-video //renderer`; Windows parts: `bazel build --config=windows_cross //record/capture:package //record/replay:nr-replay`.
 
 ## Citation
 
