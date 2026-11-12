@@ -51,7 +51,7 @@ OptiScaler is GPL-3.0; its source for each release is attached to the release.
 
 You need a D3D12 game with DLSS frame generation and the ANR FG package (`anr-fg-full`, which brings OptiScaler) installed in it, Windows 10 or 11 or Linux with Proton, and [ffmpeg](https://ffmpeg.org/download.html) with ffprobe on the `PATH` for videos and images. Replaying NVIDIA's DLSS-G needs an NVIDIA RTX 40 or 50 series GPU.
 
-1. **Install.** Download `nr-record-1.0-windows.zip` (or `-linux.tar.gz`) from [Releases](../../releases) and extract it. Close the game and run the installer with the folder of the game's `.exe`:
+1. **Install.** Download `nr-record-1.0-windows.zip` (or `-linux.tar.gz`) from the [FG-V.B14 release](../../releases/tag/FG-V.B14) and extract it. Close the game and run the installer with the folder of the game's `.exe`:
    - Windows: `install.cmd "<folder>"`. Windows needs no launch option.
    - Linux and Steam Deck (Proton): `sh install.sh "<folder>"`. Under Proton only, the game's Steam launch options need `WINEDLLOVERRIDES="dxgi=n,b" %command%` (the ANR FG installer prints the same line); do not set it on Windows (a game with it set there may not start).
 
