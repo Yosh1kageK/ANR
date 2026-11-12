@@ -1,0 +1,24 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+# The GPU device and logging of the native tools (the renderer's viewer, the runtime's host): spdlog's logger with NRI's
+# messages in it (log.h), and on Linux and Windows a Vulkan device for NRI with the extensions and features a caller
+# asks for (vulkan.h). macOS uses NRI's own Metal device.
+cc_library(
+    name = "device",
+    srcs = ["log.cpp"] + select({
+        "@platforms//os:macos": [],
+        "//conditions:default": ["vulkan.cpp"],
+    }),
+    hdrs = [
+        "log.h",
+        "vulkan.h",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@nri",
+        "@spdlog",
+    ] + select({
+        "@platforms//os:macos": [],
+        "//conditions:default": ["@vulkan_headers"],
+    }),
+)

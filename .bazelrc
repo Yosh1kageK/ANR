@@ -1,0 +1,39 @@
+# Clang compiles all C++ (MODULE.bazel). The build:linux and build:windows lines apply on that host.
+common --enable_bzlmod
+common --enable_platform_specific_config
+build --compilation_mode=opt
+
+# Linux (toolchains_llvm): x86-64-v3, libgcc linked statically, so binaries need only glibc.
+build:linux --cxxopt=-std=c++20 --host_cxxopt=-std=c++20
+build:linux --copt=-fPIC
+build:linux --copt=-O3 --copt=-march=x86-64-v3 --host_copt=-march=x86-64-v3
+build:linux --linkopt=-static-libgcc
+
+# Windows: clang-cl (an LLVM install, BAZEL_LLVM) with lld-link and the static CRT.
+build:windows --extra_toolchains=@local_config_cc//:cc-toolchain-x64_windows-clang-cl
+build:windows --extra_execution_platforms=//tools:windows_clang_cl
+build:windows --features=static_link_msvcrt --host_features=static_link_msvcrt
+build:windows --cxxopt=/std:c++20 --host_cxxopt=/std:c++20
+build:windows --copt=/clang:-O3 --copt=-march=x86-64-v3 --host_copt=-march=x86-64-v3
+build:windows --enable_runfiles
+
+# Windows x64 cross-compiled on Linux (tools/windows_cross/README.md).
+common:windows_cross --noenable_platform_specific_config
+build:windows_cross --platforms=@windows_cross//:x64_windows
+build:windows_cross --platform_suffix=windows
+build:windows_cross --symlink_prefix=bazel-windows-
+build:windows_cross --extra_toolchains=@windows_cross//:cc-toolchain
+build:windows_cross --features=static_link_msvcrt
+build:windows_cross --cxxopt=/std:c++20 --host_cxxopt=-std=c++20
+build:windows_cross --copt=/clang:-O3 --copt=-march=x86-64-v3
+
+# Debug on Linux: bazel build --config=debug //record:all
+build:debug --compilation_mode=dbg --copt=-O0
+
+try-import %workspace%/.bazelrc.user
+
+# macOS (toolchains_llvm, Apple silicon, Xcode's SDK): the renderer's viewer on NRI's Metal 4 backend needs macOS 26.
+build:macos --cxxopt=-std=c++20 --host_cxxopt=-std=c++20
+build:macos --copt=-O3
+build:macos --copt=-mmacosx-version-min=26.0 --linkopt=-mmacosx-version-min=26.0
+build:macos --host_copt=-mmacosx-version-min=26.0 --host_linkopt=-mmacosx-version-min=26.0

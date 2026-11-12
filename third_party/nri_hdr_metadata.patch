@@ -1,0 +1,56 @@
+HDR metadata of the study mode (renderer/README.md, Study mode). Applied after nri_hdr.patch.
+
+- NRISwapChain.h, SwapChainVK.hpp: SwapChainDesc gets the content light level, the minimum luminance and a Rec. 2020
+  primaries flag for the VK_EXT_hdr_metadata that nri_hdr.patch sends, so the study viewer's per-trial metadata (BT.2020
+  primaries, D65 white, min and max luminance, max_cll, max_fall) is what the old viewer set. All three default to the
+  renderer's metadata (Rec. 709 primaries, minimum 0, content light level = peak).
+
+diff -ru a/Include/Extensions/NRISwapChain.h b/Include/Extensions/NRISwapChain.h
+--- a/Include/Extensions/NRISwapChain.h	2026-11-09 03:20:23.255181641 -0700
++++ b/Include/Extensions/NRISwapChain.h	2026-11-09 03:20:33.329727256 -0700
+@@ -108,6 +108,12 @@
+     // (VK: VK_EXT_hdr_metadata, when the device has it enabled); 0 sends none
+     NriOptional float hdrMaxLuminance;
+     NriOptional float hdrMaxFrameAverageLuminance;
++
++    // The rest of the metadata, for content with its own mastering display (the study mode): the content light level
++    // (0: "hdrMaxLuminance"), the minimum luminance in nits, and Rec. 2020 primaries instead of Rec. 709's
++    NriOptional float hdrMaxContentLightLevel;
++    NriOptional float hdrMinLuminance;
++    NriOptional bool hdrRec2020Primaries;
+ };
+ 
+ NriStruct(ChromaticityCoords) {
+diff -ru a/Source/VK/SwapChainVK.hpp b/Source/VK/SwapChainVK.hpp
+--- a/Source/VK/SwapChainVK.hpp	2026-11-09 03:20:23.255707019 -0700
++++ b/Source/VK/SwapChainVK.hpp	2026-11-09 03:20:33.329787217 -0700
+@@ -420,17 +420,23 @@
+         VkResult vkResult = vk.CreateSwapchainKHR(m_Device, &swapchainInfo, m_Device.GetVkAllocationCallbacks(), &m_Handle);
+         NRI_RETURN_ON_BAD_VKRESULT(&m_Device, vkResult, "vkCreateSwapchainKHR");
+ 
+-        // HDR metadata: a mastering display with Rec. 709 primaries and D65 white, at the content's peak
++        // HDR metadata: a mastering display with Rec. 709 primaries (Rec. 2020 on request) and D65 white, at the content's peak
+         const bool hdr = swapChainDesc.format == SwapChainFormat::BT709_G10_16BIT || swapChainDesc.format == SwapChainFormat::BT2020_G2084_10BIT;
+         if (hdr && vk.SetHdrMetadataEXT && swapChainDesc.hdrMaxLuminance > 0.0f) {
+             VkHdrMetadataEXT metadata = {VK_STRUCTURE_TYPE_HDR_METADATA_EXT};
+-            metadata.displayPrimaryRed = {0.640f, 0.330f};
+-            metadata.displayPrimaryGreen = {0.300f, 0.600f};
+-            metadata.displayPrimaryBlue = {0.150f, 0.060f};
++            if (swapChainDesc.hdrRec2020Primaries) {
++                metadata.displayPrimaryRed = {0.708f, 0.292f};
++                metadata.displayPrimaryGreen = {0.170f, 0.797f};
++                metadata.displayPrimaryBlue = {0.131f, 0.046f};
++            } else {
++                metadata.displayPrimaryRed = {0.640f, 0.330f};
++                metadata.displayPrimaryGreen = {0.300f, 0.600f};
++                metadata.displayPrimaryBlue = {0.150f, 0.060f};
++            }
+             metadata.whitePoint = {0.3127f, 0.3290f};
+             metadata.maxLuminance = swapChainDesc.hdrMaxLuminance;
+-            metadata.minLuminance = 0.0f;
+-            metadata.maxContentLightLevel = swapChainDesc.hdrMaxLuminance;
++            metadata.minLuminance = swapChainDesc.hdrMinLuminance;
++            metadata.maxContentLightLevel = swapChainDesc.hdrMaxContentLightLevel > 0.0f ? swapChainDesc.hdrMaxContentLightLevel : swapChainDesc.hdrMaxLuminance;
+             metadata.maxFrameAverageLightLevel = swapChainDesc.hdrMaxFrameAverageLuminance;
+             vk.SetHdrMetadataEXT(m_Device, 1, &m_Handle, &metadata);
+             NRI_REPORT_INFO(&m_Device, "HDR metadata: max %.0f nits, max frame average %.0f nits", swapChainDesc.hdrMaxLuminance, swapChainDesc.hdrMaxFrameAverageLuminance);

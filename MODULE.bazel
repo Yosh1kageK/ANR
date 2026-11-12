@@ -1,0 +1,365 @@
+"""Apex Neural Rendering's public tools: nr-record (record/README.md). Third-party sources are pinned: Bazel Central
+Registry modules and the LLVM release toolchains_llvm downloads."""
+
+module(name = "anr")
+
+bazel_dep(name = "rules_cc", version = "0.2.27")
+bazel_dep(name = "platforms", version = "1.1.0")
+bazel_dep(name = "nlohmann_json", version = "3.12.0.bcr.2")
+bazel_dep(name = "zstd", version = "1.5.7.bcr.3")
+bazel_dep(name = "toolchains_llvm", version = "1.13.0")
+
+# Clang compiles the C++. Linux: LLVM 23.1.5 from toolchains_llvm with the host's libstdc++ linked statically and the
+# host's glibc. Windows: clang-cl from an LLVM install (BAZEL_LLVM) with Visual Studio's C++ library and Windows SDK
+# (.bazelrc: build:windows), or cross-compiled on Linux (--config=windows_cross, tools/windows_cross/README.md).
+llvm = use_extension("@toolchains_llvm//toolchain/extensions:llvm.bzl", "llvm")
+llvm.toolchain(
+    cxx_standard = {"": "c++20"},
+    llvm_version = "23.1.5",
+    stdlib = {"": "stdc++"},
+)
+use_repo(llvm, "llvm_toolchain", "llvm_toolchain_llvm")
+
+register_toolchains("@llvm_toolchain//:all")
+
+# Windows x64 on Linux: the pinned LLVM's clang-cl and lld-link with the MSVC C runtime and Windows SDK that xwin
+# downloads from Microsoft. Fetched only for --config=windows_cross builds; fetching it accepts Microsoft's license
+# terms for those files (tools/windows_cross/README.md).
+windows_cross = use_repo_rule("//tools/windows_cross:windows_cross.bzl", "windows_cross")
+
+windows_cross(
+    name = "windows_cross",
+    clang = "@llvm_toolchain_llvm//:bin/clang",
+    crt_version = "14.51",
+    manifest_version = "18",
+    sdk_version = "10.0.28000",
+    xwin_sha256 = "d870eb4b2f390878af6da1ccd3cf321d22fcb72720984853b4be732ae597fc88",
+    xwin_strip_prefix = "xwin-0.10.0-x86_64-unknown-linux-musl",
+    xwin_url = "https://github.com/Jake-Shadle/xwin/releases/download/0.10.0/xwin-0.10.0-x86_64-unknown-linux-musl.tar.gz",
+)
+
+# Archives with BUILD files in third_party/ (module.d's parts add them).
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+cc_configure = use_extension("@rules_cc//cc:extensions.bzl", "cc_configure_extension")
+use_repo(cc_configure, "local_config_cc")
+
+# Shared by the export's parts: logging, the NGX interface headers (NVIDIA's DLSS SDK; builds use its headers and
+# NGX's static loader only, and ship no NVIDIA library), Vulkan's headers, and Slang with DXC for the shaders.
+bazel_dep(name = "spdlog", version = "1.17.0")
+bazel_dep(name = "bazel_skylib", version = "1.9.2")
+
+
+
+http_archive(
+    name = "dlss",
+    build_file = "//third_party:dlss.BUILD",
+    sha256 = "418d6c685b062855f970d55d1e172eff834658a17b3483aaffddf44d5b0cb026",
+    strip_prefix = "DLSS-310.9.16",
+    urls = ["https://github.com/NVIDIA/DLSS/archive/refs/tags/v310.9.16.zip"],
+)
+
+http_archive(
+    name = "vulkan_headers",
+    build_file = "//third_party:vulkan_headers.BUILD",
+    sha256 = "c96ce26543ab8d12c51d1347169fd6a6a0d80a29aa532db221ff231090569fa5",
+    strip_prefix = "Vulkan-Headers-1.4.368",
+    urls = ["https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/v1.4.368.zip"],
+)
+
+# slangc 2026.21 per build host (tools/BUILD.bazel picks it), and Microsoft's DXC release for DXIL on Linux.
+http_archive(
+    name = "slang",
+    build_file = "//third_party:slang.BUILD",
+    sha256 = "691f9341e5bec099eec97ee30a83bcbef541cee7fe3b4de68a821d42f9506c2f",
+    urls = ["https://github.com/shader-slang/slang/releases/download/v2026.21/slang-2026.21-linux-x86_64.tar.gz"],
+)
+
+http_archive(
+    name = "slang_macos",
+    build_file = "//third_party:slang.BUILD",
+    sha256 = "1a8592dfdbcc108cfedfd6a668ba68ca478a8804da49a97eac422102dc3c9c5f",
+    urls = ["https://github.com/shader-slang/slang/releases/download/v2026.21/slang-2026.21-macos-aarch64.zip"],
+)
+
+http_archive(
+    name = "slang_windows",
+    build_file = "//third_party:slang.BUILD",
+    sha256 = "4b6f509e73397175ed36a341beb7ad15f4fff5feaf5f6d95fecf896c0d86b8de",
+    urls = ["https://github.com/shader-slang/slang/releases/download/v2026.21/slang-2026.21-windows-x86_64.zip"],
+)
+
+http_archive(
+    name = "dxc_linux",
+    build_file = "//third_party:dxc_release.BUILD",
+    sha256 = "96faadc7f5c282d2ffda49804beb4c3ee38127bc252b723234e3c5cdf7aa39a1",
+    urls = ["https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.9.2609/linux_dxc_2026_09_28.x86_x64.tar.gz"],
+)
+
+# The Shader Model 6.10 preview DXC (slang.bzl's slang_dxil_linalg; fetched only if a target uses it).
+http_archive(
+    name = "dxc_preview_linux",
+    build_file = "//third_party:dxc_release.BUILD",
+    sha256 = "dea02d61c0548a6163a5fb45daa9263faeb5334e35d25a30b0293a32d089ceae",
+    urls = ["https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.10.2605.37/linux_dxc_2026_08_11.x86_64.tar.gz"],
+)
+
+# The renderer's viewer (renderer/README.md): its window, input and gamepads (SDL3, static; Linux loads X11 and Wayland
+# at run time), NRI with NRIFramework and MathLib, ImGui, the Vulkan loader built from source, and on macOS metal-cpp and
+# DXC built from source (rules_foreign_cc) for its DXIL shaders.
+bazel_dep(name = "libexpat", version = "2.9.0")  # wayland-scanner
+bazel_dep(name = "sdl3", version = "3.4.20")
+bazel_dep(name = "rules_foreign_cc", version = "0.17.0")
+
+# SDL 3.4.20 with the Bazel build of the BCR's sdl3 3.4.18.bcr.1 (the BCR has no 3.4.20 yet; no source files were
+# added or removed in between), and SDL3 with libdecor on Wayland (window decorations where the compositor draws
+# none, as on GNOME), which the BCR build leaves out.
+archive_override(
+    module_name = "sdl3",
+    integrity = "sha256-87sG9VvtlVcienAK8upi5JSX699YA3cypzGl+z74WB8=",
+    patch_strip = 1,
+    patches = [
+        "//third_party:sdl3_bcr_overlay.patch",  # the BCR overlay's files, with version 3.4.20 in its MODULE.bazel
+        "//third_party:sdl3_bcr_testprocess.patch",  # the BCR's patch
+        "//third_party:sdl3_libdecor_module.patch",  # libdecor's header, pinned
+        "//third_party:sdl3_libdecor_build.patch",  # SDL's dynamic libdecor support
+        "//third_party:sdl3_scroll_source.patch",  # native touch-surface identification in wheel events
+    ],
+    strip_prefix = "SDL3-3.4.20",
+    urls = ["https://github.com/libsdl-org/SDL/releases/download/release-3.4.20/SDL3-3.4.20.tar.gz"],
+)
+
+# NRI (NVIDIA Render Interface), and NRIFramework with MathLib, at the commits NRISamples 8ba0e4e uses (NRI main of
+# 7 November 2026, 9 commits after its v191 release; NRIFramework f313ac8 only moves its NRI submodule to that commit).
+http_archive(
+    name = "nri",
+    build_file = "//third_party:nri.BUILD",
+    # D3D12 with the Agility SDK 1.721 preview's headers (below), which declare no ID3D12Device16 or
+    # ID3D12GraphicsCommandList12: the newest interfaces they have. HDR swap chains: nri_hdr.patch's header.
+    patch_args = ["-p1"],
+    # Compute pipelines with a required subgroup size (AMD's 64-lane default): nri_subgroup_size.patch. A Vulkan game's
+    # device, whose enabled features are not known: nri_unknown_features.patch.
+    patches = ["//third_party:nri_agility_721.patch", "//third_party:nri_hdr.patch", "//third_party:nri_hdr_metadata.patch",
+               "//third_party:nri_subgroup_size.patch", "//third_party:nri_unknown_features.patch"],
+    sha256 = "984eedb87a3e116f260e555cb263aa0fce5c0823058705b4528450c3607713e1",
+    strip_prefix = "NRI-a20efc8f7c6e4e6045acd6f29bf90b0d26ac3df5",
+    urls = ["https://github.com/NVIDIA-RTX/NRI/archive/a20efc8f7c6e4e6045acd6f29bf90b0d26ac3df5.zip"],
+)
+
+http_archive(
+    name = "nri_framework",
+    build_file = "//third_party:nri_framework.BUILD",
+    # Static textures fall back to 1x1 images (the NRISamples asset pack, a 7z, is not fetched); unnamed glTF
+    # materials load.
+    patch_args = ["-p1"],
+    patches = ["//third_party:nri_framework.patch"],
+    sha256 = "56117008e55b666c09179cf160e9574242bce126b8bb13b48d5d78795dde8f3e",
+    strip_prefix = "NRIFramework-f313ac8dde11782a508e0b7dc4fdf9d54e768753",
+    urls = ["https://github.com/NVIDIA-RTX/NRIFramework/archive/f313ac8dde11782a508e0b7dc4fdf9d54e768753.zip"],
+)
+
+# sse2neon: MathLib's SSE intrinsics on ARM (ml.h includes it where ML_ARM is set; MathLib's CMake downloads it).
+http_archive(
+    name = "sse2neon",
+    build_file_content = """load("@rules_cc//cc:defs.bzl", "cc_library")
+
+cc_library(
+    name = "sse2neon",
+    hdrs = ["sse2neon.h"],
+    includes = ["."],
+    visibility = ["//visibility:public"],
+)
+""",
+    sha256 = "6c073b181fa2a36ed4159ef25bebb1fc7c9e64ab20b26089dfa39f9c5221f866",
+    strip_prefix = "sse2neon-1.9.1",
+    urls = ["https://github.com/DLTcollab/sse2neon/archive/refs/tags/v1.9.1.zip"],
+)
+
+http_archive(
+    name = "mathlib",
+    build_file = "//third_party:mathlib.BUILD",
+    sha256 = "025b511a79f27b950ca6bf7fb5fe286f9e22f55eeaf995e64d136b3392855c41",
+    strip_prefix = "MathLib-294c8f2eb9f2c094ac69b690e16c1ad5f0676ff1",
+    urls = ["https://github.com/NVIDIA-RTX/MathLib/archive/294c8f2eb9f2c094ac69b690e16c1ad5f0676ff1.zip"],
+)
+
+http_archive(
+    name = "vma",
+    build_file = "//third_party:vma.BUILD",
+    sha256 = "075be226837fbd9bbe6fb3f2d6d8ef8175d10c47f1eaf0b0694031834b4d8044",
+    strip_prefix = "VulkanMemoryAllocator-0f1a757da579831283413295cc7f3b47eb521c77",
+    urls = ["https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator/archive/0f1a757da579831283413295cc7f3b47eb521c77.zip"],
+)
+
+http_archive(
+    name = "imgui",
+    build_file = "//third_party:imgui.BUILD",
+    # The docking branch's release (the renderer's dock layout); otherwise the same as v1.93.0
+    sha256 = "302ccb19cf6ff803ebc970b4f96d59c95dd3a32169453ad5c503cab67c057992",
+    strip_prefix = "imgui-1.93.0-docking",
+    urls = ["https://github.com/ocornut/imgui/archive/refs/tags/v1.93.0-docking.zip"],
+)
+
+# NRIFramework's header names GLFW's types (no GLFW code is built), and its glTF loader is cgltf.
+http_archive(
+    name = "glfw",
+    build_file = "//third_party:glfw.BUILD",
+    sha256 = "e9a80355e8a0c59b15ae8576c2c3aeae792c2b1082ec426dc93bde70d5017fda",
+    strip_prefix = "glfw-3.5.1",
+    urls = ["https://github.com/glfw/glfw/archive/refs/tags/3.5.1.zip"],
+)
+
+http_archive(
+    name = "cgltf",
+    build_file = "//third_party:cgltf.BUILD",
+    sha256 = "2d75d2338c0bfb459b8960ebace0f6a49f17eafc261b44568a543c1b6670b933",
+    strip_prefix = "cgltf-85cd62382dfea638278962690cf515023f33ed00",
+    urls = ["https://github.com/jkuhlmann/cgltf/archive/85cd62382dfea638278962690cf515023f33ed00.zip"],
+)
+
+# Metal 4 on macOS (NRI's Metal backend): metal-cpp at the release NRI's CMake fetches, and DXC, which Slang calls to
+# compile our shaders to DXIL (NRI converts DXIL to Metal with Apple's Metal Shader Converter). Microsoft publishes
+# no DXC for macOS, so it builds from source (third_party/BUILD.bazel), with the DirectX-Headers commit of its
+# submodule.
+http_archive(
+    name = "metal_cpp",
+    build_file = "//third_party:metal_cpp.BUILD",
+    sha256 = "2186a1dc70b79076dcc5e168029752b39c064257dcc047aee502ae2152aab260",
+    strip_prefix = "metal-cpp-release-metal-cpp_macOS27.0.1_iOS27.0.1",
+    urls = ["https://github.com/apple/metal-cpp/archive/refs/tags/release/metal-cpp_macOS27.0.1_iOS27.0.1.zip"],
+)
+
+http_archive(
+    name = "dxc",
+    build_file_content = 'filegroup(name = "all_files", srcs = glob(["**"]), visibility = ["//visibility:public"])\n',
+    # DXIL only: without the SPIR-V code generation DXC's CMake turns on outside Windows (it needs two more
+    # submodules).
+    patch_cmds = ["sed -i.orig 's/^  set(ENABLE_SPIRV_CODEGEN ON)$/  # SPIR-V code generation stays as configured/' CMakeLists.txt"],
+    sha256 = "05b8e9622f9b147156998e6aab38d71997ec8391038e7302c703e9ca2448dfed",
+    strip_prefix = "DirectXShaderCompiler-1.9.2609",
+    urls = ["https://github.com/microsoft/DirectXShaderCompiler/archive/refs/tags/v1.9.2609.tar.gz"],
+)
+
+http_archive(
+    name = "directx_headers",
+    build_file_content = 'filegroup(name = "all_files", srcs = glob(["**"]), visibility = ["//visibility:public"])\n',
+    sha256 = "b5a4b6d8806ff7f29f19879f83d015dbe8740676d4ca0b48647a789cc7773c4e",
+    strip_prefix = "DirectX-Headers-980971e835876dc0cde415e8f9bc646e64667bf7",
+    urls = ["https://github.com/microsoft/DirectX-Headers/archive/980971e835876dc0cde415e8f9bc646e64667bf7.tar.gz"],
+)
+
+# NRI's D3D12 backend on Windows: the D3D12 Agility SDK 1.721.3 preview's headers (NuGet; SHA-512 checked against
+# nuget.org) and the D3D12 Memory Allocator at the commit NRI's CMake fetches.
+http_archive(
+    name = "agility_sdk",
+    build_file = "//third_party:agility_sdk.BUILD",
+    sha256 = "0131bce1e4bace3fc08c03018c29a09ede2570b263721c6449b0ec75762ab22d",
+    type = "zip",
+    urls = ["https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/1.721.3-preview"],
+)
+
+http_archive(
+    name = "d3d12ma",
+    build_file = "//third_party:d3d12ma.BUILD",
+    sha256 = "74e6f424b48ca34e992cf6c9907a6229710ab2536f50b1dd5825f67bda18a681",
+    strip_prefix = "D3D12MemoryAllocator-1753823e86d274ae1a2a55e6b9f9d206c3c30945",
+    urls = ["https://github.com/GPUOpen-LibrariesAndSDKs/D3D12MemoryAllocator/archive/1753823e86d274ae1a2a55e6b9f9d206c3c30945.zip"],
+)
+
+# Apple's Metal Shader Converter (libmetalirconverter), installed from developer.apple.com (a download behind an Apple
+# account, so not pinned here): an empty library where it is missing.
+metal_shader_converter = use_repo_rule("//third_party:metal_shader_converter.bzl", "metal_shader_converter")
+
+metal_shader_converter(name = "metal_shader_converter")
+
+# X11 headers from X.Org releases, for NRI's and the Vulkan loader's Xlib code (the system's are not used).
+http_archive(
+    name = "x11_proto",
+    build_file = "//third_party:x11_headers.BUILD",
+    sha256 = "f9bfe4a9ed8c8ab9d2a3b0d49797f046052dadd06b7a8b45dbffaffb137e8290",
+    strip_prefix = "xorgproto-2026.1",
+    urls = ["https://xorg.freedesktop.org/releases/individual/proto/xorgproto-2026.1.tar.xz"],
+)
+
+http_archive(
+    name = "x11_lib",
+    build_file = "//third_party:x11_headers.BUILD",
+    sha256 = "bbc78c46217174655c2b32b138ad119f3ac15f50808b4d0b3a2677a4b1afc950",
+    strip_prefix = "libX11-1.8.14",
+    urls = ["https://xorg.freedesktop.org/releases/individual/lib/libX11-1.8.14.tar.xz"],
+)
+
+http_archive(
+    name = "x11_xrandr",
+    build_file = "//third_party:x11_headers.BUILD",
+    sha256 = "72b922c2e765434e9e9f0960148070bd4504b288263e2868a4ccce1b7cf2767a",
+    strip_prefix = "libXrandr-1.5.5",
+    urls = ["https://xorg.freedesktop.org/releases/individual/lib/libXrandr-1.5.5.tar.xz"],
+)
+
+http_archive(
+    name = "x11_xrender",
+    build_file = "//third_party:x11_headers.BUILD",
+    sha256 = "3fe88c609df6782e1e7af2e4de36b2563d70cd70ff7dcb1cda561ad64912bb64",
+    strip_prefix = "libXrender-0.9.13",
+    urls = ["https://xorg.freedesktop.org/releases/individual/lib/libXrender-0.9.13.tar.xz"],
+)
+
+http_archive(
+    name = "x11_xfixes",
+    build_file = "//third_party:x11_headers.BUILD",
+    sha256 = "39f115d72d9c5f8111e4684164d3d68cc1fd21f9b27ff2401b08fddfc0f409ba",
+    strip_prefix = "libXfixes-6.0.2",
+    urls = ["https://xorg.freedesktop.org/releases/individual/lib/libXfixes-6.0.2.tar.xz"],
+)
+
+http_archive(
+    name = "x11_xi",
+    build_file = "//third_party:x11_headers.BUILD",
+    sha256 = "ddd6057b89a91903bc2f884d55c8467440906945e482c36547260dff28661afc",
+    strip_prefix = "libXi-1.8.4",
+    urls = ["https://xorg.freedesktop.org/releases/individual/lib/libXi-1.8.4.tar.xz"],
+)
+
+http_archive(
+    name = "x11_xinerama",
+    build_file = "//third_party:x11_headers.BUILD",
+    sha256 = "d00fc1599c303dc5cbc122b8068bdc7405d6fcb19060f4597fc51bd3a8be51d7",
+    strip_prefix = "libXinerama-1.1.6",
+    urls = ["https://xorg.freedesktop.org/releases/individual/lib/libXinerama-1.1.6.tar.xz"],
+)
+
+http_archive(
+    name = "x11_xcursor",
+    build_file = "//third_party:x11_headers.BUILD",
+    sha256 = "fde9402dd4cfe79da71e2d96bb980afc5e6ff4f8a7d74c159e1966afb2b2c2c0",
+    strip_prefix = "libXcursor-1.2.3",
+    urls = ["https://xorg.freedesktop.org/releases/individual/lib/libXcursor-1.2.3.tar.xz"],
+)
+
+http_archive(
+    name = "x11_xext",
+    build_file = "//third_party:x11_headers.BUILD",
+    sha256 = "6c643c7035cdacf67afd68f25d01b90ef889d546c9fcd7c0adf7c2cf91e3a32d",
+    strip_prefix = "libXext-1.3.7",
+    urls = ["https://xorg.freedesktop.org/releases/individual/lib/libXext-1.3.7.tar.xz"],
+)
+
+# The Vulkan loader, built from source at the Vulkan-Headers version above (third_party/vulkan_loader.BUILD).
+http_archive(
+    name = "vulkan_loader",
+    build_file = "//third_party:vulkan_loader.BUILD",
+    sha256 = "d2fe102c8493d80f2e3d6c5b3304a331e69072d7a041b1323c6f0246b94cbf3c",
+    strip_prefix = "Vulkan-Loader-1.4.368",
+    urls = ["https://github.com/KhronosGroup/Vulkan-Loader/archive/refs/tags/v1.4.368.tar.gz"],
+)
+
+# Wayland: wayland-scanner and the client headers (third_party/wayland.BUILD), for Vulkan's Wayland surfaces. The
+# libraries themselves are the system's, loaded at run time.
+http_archive(
+    name = "wayland",
+    build_file = "//third_party:wayland.BUILD",
+    sha256 = "56b3a985cbfe17a926e3bcf037e4d374f44eaa33f3a4b364549dddf0d324cebc",
+    strip_prefix = "wayland-1.26.0",
+    urls = ["https://gitlab.freedesktop.org/wayland/wayland/-/archive/1.26.0/wayland-1.26.0.tar.gz"],
+)

@@ -1,0 +1,32 @@
+A compute pipeline's required subgroup size (VK_EXT_subgroup_size_control, core in Vulkan 1.3), for the NR runtime's
+default kernel build on AMD, whose drivers default to 64-lane subgroups: ComputePipelineDesc::requiredSubgroupSize,
+chained into the compute stage as VkPipelineShaderStageRequiredSubgroupSizeCreateInfo. Applied after nri_hdr_metadata.patch.
+
+diff -ru a/Include/NRIDescs.h b/Include/NRIDescs.h
+--- a/Include/NRIDescs.h	2026-11-10 02:43:45.096585331 -0700
++++ b/Include/NRIDescs.h	2026-11-10 02:43:45.108909278 -0700
+@@ -1670,6 +1670,7 @@
+     Nri(ComputePipelineBits) flags;
+     Nri(Robustness) robustness;
+     NriOptional const NriPtr(PipelineCache) cache; // uses a cached blob on a hit and stores the result on a miss
++    NriOptional uint32_t requiredSubgroupSize;     // VK: the subgroup size the compute stage must run with (VK_EXT_subgroup_size_control, core in 1.3); 0: the driver's choice; others ignore it
+ };
+ 
+ #pragma endregion
+diff -ru a/Source/VK/PipelineVK.hpp b/Source/VK/PipelineVK.hpp
+--- a/Source/VK/PipelineVK.hpp	2026-11-10 02:43:45.097071628 -0700
++++ b/Source/VK/PipelineVK.hpp	2026-11-10 02:43:45.109963524 -0700
+@@ -490,6 +490,13 @@
+     if (isDescriptorHeap)
+         SetupDescriptorHeapShaderStages(pipelineLayoutVK, &stage, 1, mappings, &mappingInfo, mappingSamplers);
+ 
++    VkPipelineShaderStageRequiredSubgroupSizeCreateInfo requiredSubgroupSize = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO};
++    if (computePipelineDesc.requiredSubgroupSize) {
++        requiredSubgroupSize.pNext = (void*)stage.pNext;
++        requiredSubgroupSize.requiredSubgroupSize = computePipelineDesc.requiredSubgroupSize;
++        stage.pNext = &requiredSubgroupSize;
++    }
++
+     VkPipelineCreateFlags computeFlags = 0;
+     if ((computePipelineDesc.flags & ComputePipelineBits::FAIL_ON_CACHE_MISS) && m_Device.GetDesc().features.pipelineCacheControl)
+         computeFlags |= VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT;

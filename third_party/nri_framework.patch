@@ -1,0 +1,94 @@
+--- a/Source/Utils.cpp
++++ b/Source/Utils.cpp
+@@ -526,6 +526,19 @@
+     return true;
+ }
+ 
++// Static textures: the file from _Data/Textures if present, else a 1x1 image (the viewer of neural-rendering ships
++// no asset pack; it does not sample the ranking and Sobol tables).
++static const uint8_t kBlackPng[] = {137,80,78,71,13,10,26,10,0,0,0,13,73,72,68,82,0,0,0,1,0,0,0,1,8,6,0,0,0,31,21,196,137,0,0,0,13,73,68,65,84,120,156,99,96,96,96,248,15,0,1,4,1,0,95,229,195,75,0,0,0,0,73,69,78,68,174,66,96,130};
++static const uint8_t kWhitePng[] = {137,80,78,71,13,10,26,10,0,0,0,13,73,72,68,82,0,0,0,1,0,0,0,1,8,6,0,0,0,31,21,196,137,0,0,0,11,73,68,65,84,120,156,99,248,15,4,0,9,251,3,253,251,94,107,43,0,0,0,0,73,69,78,68,174,66,96,130};
++static const uint8_t kInvalidPng[] = {137,80,78,71,13,10,26,10,0,0,0,13,73,72,68,82,0,0,0,1,0,0,0,1,8,6,0,0,0,31,21,196,137,0,0,0,13,73,68,65,84,120,156,99,248,207,240,255,63,0,6,254,2,254,12,117,137,222,0,0,0,0,73,69,78,68,174,66,96,130};
++static const uint8_t kFlatNormalPng[] = {137,80,78,71,13,10,26,10,0,0,0,13,73,72,68,82,0,0,0,1,0,0,0,1,8,6,0,0,0,31,21,196,137,0,0,0,13,73,68,65,84,120,156,99,104,104,248,255,31,0,6,130,2,255,179,190,81,51,0,0,0,0,73,69,78,68,174,66,96,130};
++static const uint8_t kZeroPng[] = {137,80,78,71,13,10,26,10,0,0,0,13,73,72,68,82,0,0,0,1,0,0,0,1,8,6,0,0,0,31,21,196,137,0,0,0,11,73,68,65,84,120,156,99,96,0,2,0,0,5,0,1,122,94,171,63,0,0,0,0,73,69,78,68,174,66,96,130};
++static bool LoadStaticTexture(const char* name, const uint8_t* fallback, int fallbackSize, utils::Texture& texture, bool computeAvg = false) {
++    const std::string path = utils::GetFullPath(name, utils::DataFolder::TEXTURES);
++    if (std::filesystem::exists(path))
++        return utils::LoadTexture(path, texture, computeAvg);
++    return utils::LoadTextureFromMemory(name, fallback, fallbackSize, texture, computeAvg);
++}
+ bool utils::LoadTexture(const std::string& path, Texture& texture, bool computeAvgColorAndAlphaMode) {
+     printf("Loading texture '%s'...\n", GetFileName(path));
+ 
+@@ -1431,29 +1444,25 @@
+     if (scene.textures.empty()) {
+         { // StaticTexture::Black
+             Texture* texture = new Texture;
+-            const std::string& texPath = GetFullPath("black.png", DataFolder::TEXTURES);
+-            NRI_ABORT_ON_FALSE(LoadTexture(texPath, *texture));
++            NRI_ABORT_ON_FALSE(LoadStaticTexture("black.png", kBlackPng, (int)sizeof(kBlackPng), *texture));
+             scene.textures.push_back(texture);
+         }
+ 
+         { // StaticTexture::White
+             Texture* texture = new Texture;
+-            const std::string& texPath = GetFullPath("white.png", DataFolder::TEXTURES);
+-            NRI_ABORT_ON_FALSE(LoadTexture(texPath, *texture));
++            NRI_ABORT_ON_FALSE(LoadStaticTexture("white.png", kWhitePng, (int)sizeof(kWhitePng), *texture));
+             scene.textures.push_back(texture);
+         }
+ 
+         { // StaticTexture::Invalid
+             Texture* texture = new Texture;
+-            const std::string& texPath = GetFullPath("checkerboard0.dds", DataFolder::TEXTURES);
+-            NRI_ABORT_ON_FALSE(LoadTexture(texPath, *texture, true));
++            NRI_ABORT_ON_FALSE(LoadStaticTexture("checkerboard0.dds", kInvalidPng, (int)sizeof(kInvalidPng), *texture, true));
+             scene.textures.push_back(texture);
+         }
+ 
+         { // StaticTexture::FlatNormal
+             Texture* texture = new Texture;
+-            const std::string& texPath = GetFullPath("flatnormal.png", DataFolder::TEXTURES);
+-            NRI_ABORT_ON_FALSE(LoadTexture(texPath, *texture));
++            NRI_ABORT_ON_FALSE(LoadStaticTexture("flatnormal.png", kFlatNormalPng, (int)sizeof(kFlatNormalPng), *texture));
+             scene.textures.push_back(texture);
+         }
+ 
+@@ -1472,8 +1481,7 @@
+             snprintf(s, sizeof(s), "scrambling_ranking_128x128_2d_%uspp.png", 1 << i);
+ 
+             Texture* texture = new Texture;
+-            const std::string& texPath = GetFullPath(s, DataFolder::TEXTURES);
+-            NRI_ABORT_ON_FALSE(LoadTexture(texPath, *texture));
++            NRI_ABORT_ON_FALSE(LoadStaticTexture(s, kZeroPng, (int)sizeof(kZeroPng), *texture));
+             if (overrideFormat)
+                 texture->OverrideFormat(nri::Format::RGBA8_UINT);
+             scene.textures.push_back(texture);
+@@ -1481,8 +1489,7 @@
+ 
+         { // StaticTexture::SobolSequence
+             Texture* texture = new Texture;
+-            const std::string& texPath = GetFullPath("sobol_256_4d.png", DataFolder::TEXTURES);
+-            NRI_ABORT_ON_FALSE(LoadTexture(texPath, *texture));
++            NRI_ABORT_ON_FALSE(LoadStaticTexture("sobol_256_4d.png", kZeroPng, (int)sizeof(kZeroPng), *texture));
+             if (overrideFormat)
+                 texture->OverrideFormat(nri::Format::RGBA8_UINT);
+             scene.textures.push_back(texture);
+@@ -1601,12 +1608,13 @@
+         material.alphaMode = useTransmission ? AlphaMode::TRANSPARENT : diffuseTexture->alphaMode;
+ 
+         // TODO: hacks
+-        material.isHair = strstr(gltfMaterial.name, "_hair") != 0 || strstr(gltfMaterial.name, "OmniHairBase") != 0;
+-        material.isLeaf = strstr(gltfMaterial.name, "Foliage") != 0;
+-        material.isSkin = strstr(gltfMaterial.name, "_skin") != 0;
++        const char* materialName = gltfMaterial.name ? gltfMaterial.name : ""; // glTF material names are optional
++        material.isHair = strstr(materialName, "_hair") != 0 || strstr(materialName, "OmniHairBase") != 0;
++        material.isLeaf = strstr(materialName, "Foliage") != 0;
++        material.isSkin = strstr(materialName, "_skin") != 0;
+ 
+         // TODO: remove strange polygon on the window in Kitchen scene
+-        if (strstr(gltfMaterial.name, "Material_295"))
++        if (strstr(materialName, "Material_295"))
+             material.alphaMode = AlphaMode::OFF;
+ 
+         /*

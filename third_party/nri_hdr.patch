@@ -1,0 +1,137 @@
+HDR swap chains for the renderer (renderer/README.md, Display). Applied after nri_agility_721.patch.
+
+- NRISwapChain.h, SwapChainVK.hpp (HDR metadata): SwapChainDesc gets the content's peak and maximum frame-average
+  luminance, sent with vkSetHdrMetadataEXT after the swap chain is created. NRI has no other way to reach
+  VK_EXT_hdr_metadata, and the VkSwapchainKHR it would need is private.
+- DispatchTable.h, DeviceVK.hpp: vkSetHdrMetadataEXT is loaded when the device enabled VK_EXT_hdr_metadata.
+- SwapChainVK.hpp (format choice): BT709_G10_16BIT takes only EXTENDED_SRGB_LINEAR (scRGB) and BT2020_G2084_10BIT
+  only HDR10_ST2084; without one, creation fails with UNSUPPORTED. Before, NRI fell back to any FP16 or A2B10G10R10
+  format, for example FP16 with SRGB_NONLINEAR on NVIDIA's Wayland surfaces, which shows SDR. The chosen VkFormat
+  and VkColorSpaceKHR are logged. BT709_G22_8BIT (SDR) chooses as before.
+- ImguiInterface.hpp: ImGui writes alpha as premultiplied coverage (ONE, ONE_MINUS_SRC_ALPHA), so the renderer can
+  draw the UI into its own layer and composite it over a PQ frame. Over an opaque target (alpha 1) the alpha stays 1
+  and the RGB result is unchanged.
+
+diff -ru a/Include/Extensions/NRISwapChain.h b/Include/Extensions/NRISwapChain.h
+--- a/Include/Extensions/NRISwapChain.h	2026-11-06 13:31:21.296415585 -0700
++++ b/Include/Extensions/NRISwapChain.h	2026-11-06 13:32:06.388834952 -0700
+@@ -103,6 +103,11 @@
+     NriOptional Nri(Scaling) scaling;           // VK: if scaling is not supported, "OUT_OF_DATE" error is triggered on resizing
+     NriOptional Nri(Gravity) gravityX;
+     NriOptional Nri(Gravity) gravityY;
++
++    // HDR formats: the content's peak and maximum frame-average luminance in nits, sent as HDR metadata
++    // (VK: VK_EXT_hdr_metadata, when the device has it enabled); 0 sends none
++    NriOptional float hdrMaxLuminance;
++    NriOptional float hdrMaxFrameAverageLuminance;
+ };
+ 
+ NriStruct(ChromaticityCoords) {
+diff -ru a/Source/Shared/ImguiInterface.hpp b/Source/Shared/ImguiInterface.hpp
+--- a/Source/Shared/ImguiInterface.hpp	2026-11-06 13:31:21.312839526 -0700
++++ b/Source/Shared/ImguiInterface.hpp	2026-11-06 13:32:06.389375437 -0700
+@@ -831,10 +831,10 @@
+         colorAttachment.colorBlend.srcFactor = BlendFactor::SRC_ALPHA,
+         colorAttachment.colorBlend.dstFactor = BlendFactor::ONE_MINUS_SRC_ALPHA,
+         colorAttachment.colorBlend.op = BlendOp::ADD,
+-        colorAttachment.alphaBlend.srcFactor = BlendFactor::ONE_MINUS_SRC_ALPHA,
+-        colorAttachment.alphaBlend.dstFactor = BlendFactor::ZERO,
++        colorAttachment.alphaBlend.srcFactor = BlendFactor::ONE,
++        colorAttachment.alphaBlend.dstFactor = BlendFactor::ONE_MINUS_SRC_ALPHA,
+         colorAttachment.alphaBlend.op = BlendOp::ADD,
+-        colorAttachment.colorWriteMask = ColorWriteBits::RGB;
++        colorAttachment.colorWriteMask = ColorWriteBits::RGBA;
+         colorAttachment.blendEnabled = true;
+ 
+         GraphicsPipelineDesc graphicsPipelineDesc = {};
+diff -ru a/Source/VK/DeviceVK.hpp b/Source/VK/DeviceVK.hpp
+--- a/Source/VK/DeviceVK.hpp	2026-11-06 13:31:21.308735388 -0700
++++ b/Source/VK/DeviceVK.hpp	2026-11-06 13:32:06.389290586 -0700
+@@ -2599,6 +2599,9 @@
+         GET_DEVICE_FUNC(SetLatencySleepModeNV);
+     }
+ 
++    if (IsExtensionSupported(VK_EXT_HDR_METADATA_EXTENSION_NAME, desiredDeviceExts))
++        GET_DEVICE_FUNC(SetHdrMetadataEXT);
++
+     return Result::SUCCESS;
+ }
+ 
+diff -ru a/Source/VK/DispatchTable.h b/Source/VK/DispatchTable.h
+--- a/Source/VK/DispatchTable.h	2026-11-06 13:31:21.304976334 -0700
++++ b/Source/VK/DispatchTable.h	2026-11-06 13:32:06.389054864 -0700
+@@ -270,6 +270,8 @@
+     VK_FUNC(LatencySleepNV);                              // + | +
+     VK_FUNC(SetLatencyMarkerNV);                          // + | +
+     VK_FUNC(SetLatencySleepModeNV);                       // + | +
++                                                          // VK_EXT_hdr_metadata
++    VK_FUNC(SetHdrMetadataEXT);                           // + | +
+ };
+ 
+ #undef VK_FUNC
+diff -ru a/Source/VK/SwapChainVK.hpp b/Source/VK/SwapChainVK.hpp
+--- a/Source/VK/SwapChainVK.hpp	2026-11-06 13:31:21.300898896 -0700
++++ b/Source/VK/SwapChainVK.hpp	2026-11-06 13:32:06.389021413 -0700
+@@ -134,9 +134,8 @@
+             if (s.surfaceFormat.format != VK_FORMAT_R16G16B16A16_SFLOAT)
+                 return 0;
+ 
+-            uint32_t priority = s.surfaceFormat.colorSpace == VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT ? 20 : 10;
+-
+-            return priority;
++            // scRGB only: other FP16 color spaces (BT709_LINEAR, SRGB_NONLINEAR, ...) are not extended range
++            return s.surfaceFormat.colorSpace == VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT ? 20 : 0;
+         };
+ 
+         auto priority_BT709_G22_8BIT = [](const VkSurfaceFormat2KHR& s) -> uint32_t {
+@@ -178,9 +177,8 @@
+             else
+                 return 0;
+ 
+-            priority += s.surfaceFormat.colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT ? 10 : 0;
+-
+-            return priority;
++            // PQ only: A2B10G10R10 in another color space is not HDR10
++            return s.surfaceFormat.colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT ? priority + 10 : 0;
+         };
+ 
+         switch (swapChainDesc.format) {
+@@ -209,7 +207,15 @@
+                 break;
+         }
+ 
++        // An HDR format the surface does not offer fails instead of falling back to another color space
++        const bool hdr = swapChainDesc.format == SwapChainFormat::BT709_G10_16BIT || swapChainDesc.format == SwapChainFormat::BT2020_G2084_10BIT;
++        if (hdr && (formatNum == 0 || (swapChainDesc.format == SwapChainFormat::BT709_G10_16BIT ? priority_BT709_G22_16BIT(surfaceFormats[0]) : priority_BT2020_G2084_10BIT(surfaceFormats[0])) == 0)) {
++            NRI_REPORT_WARNING(&m_Device, "the surface offers no format for 'swapChainDesc.format=%u'", (uint32_t)swapChainDesc.format);
++            return Result::UNSUPPORTED;
++        }
++
+         surfaceFormat = surfaceFormats[0];
++        NRI_REPORT_INFO(&m_Device, "Swap chain: VkFormat %u, VkColorSpaceKHR %u", (uint32_t)surfaceFormat.surfaceFormat.format, (uint32_t)surfaceFormat.surfaceFormat.colorSpace);
+     }
+ 
+     /* Present modes:
+@@ -413,6 +419,22 @@
+         // Create
+         VkResult vkResult = vk.CreateSwapchainKHR(m_Device, &swapchainInfo, m_Device.GetVkAllocationCallbacks(), &m_Handle);
+         NRI_RETURN_ON_BAD_VKRESULT(&m_Device, vkResult, "vkCreateSwapchainKHR");
++
++        // HDR metadata: a mastering display with Rec. 709 primaries and D65 white, at the content's peak
++        const bool hdr = swapChainDesc.format == SwapChainFormat::BT709_G10_16BIT || swapChainDesc.format == SwapChainFormat::BT2020_G2084_10BIT;
++        if (hdr && vk.SetHdrMetadataEXT && swapChainDesc.hdrMaxLuminance > 0.0f) {
++            VkHdrMetadataEXT metadata = {VK_STRUCTURE_TYPE_HDR_METADATA_EXT};
++            metadata.displayPrimaryRed = {0.640f, 0.330f};
++            metadata.displayPrimaryGreen = {0.300f, 0.600f};
++            metadata.displayPrimaryBlue = {0.150f, 0.060f};
++            metadata.whitePoint = {0.3127f, 0.3290f};
++            metadata.maxLuminance = swapChainDesc.hdrMaxLuminance;
++            metadata.minLuminance = 0.0f;
++            metadata.maxContentLightLevel = swapChainDesc.hdrMaxLuminance;
++            metadata.maxFrameAverageLightLevel = swapChainDesc.hdrMaxFrameAverageLuminance;
++            vk.SetHdrMetadataEXT(m_Device, 1, &m_Handle, &metadata);
++            NRI_REPORT_INFO(&m_Device, "HDR metadata: max %.0f nits, max frame average %.0f nits", swapChainDesc.hdrMaxLuminance, swapChainDesc.hdrMaxFrameAverageLuminance);
++        }
+     }
+ 
+     { // Textures

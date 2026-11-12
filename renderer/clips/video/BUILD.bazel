@@ -1,0 +1,94 @@
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
+
+# GPU video decode for the renderer's clip comparison (renderer/README.md, "GPU video decode"): our own MP4 demuxer and
+# the AV1, H.264 and H.265 header parsers (no external library), and the decoder on NRI's video extension.
+
+cc_library(
+    name = "demux",
+    srcs = [
+        "av1.cpp",
+        "mp4.cpp",
+    ],
+    hdrs = [
+        "av1.h",
+        "bitreader.h",
+        "mp4.h",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+# The codec side of the decoder: parameter sets, reference picture management and the pictures to decode, per codec.
+cc_library(
+    name = "codec_backends",
+    srcs = [
+        "backend_av1.cpp",
+        "backend_h264.cpp",
+        "backend_h265.cpp",
+    ],
+    hdrs = ["codec_backend.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":demux",
+        "@nri",
+    ],
+)
+
+# The decoder: NriVideoSource (the VideoSource of renderer/clips/video_source.h) on NRI's video extension.
+cc_library(
+    name = "nri_video_source",
+    srcs = ["nri_video_source.cpp"],
+    hdrs = ["nri_video_source.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":codec_backends",
+        ":demux",
+        "//renderer/clips:video_source",
+        "@nri",
+        "@nri_framework",
+        "@spdlog",
+    ],
+)
+
+# What the demuxer and parsers read from a file.
+cc_binary(
+    name = "parse_dump",
+    srcs = ["parse_dump.cpp"],
+    deps = [":demux"],
+)
+
+# Headless check of the GPU decoder on a file: bit for bit against ffmpeg, decode rate, CPU use, random seeks.
+cc_binary(
+    name = "decode_check",
+    srcs = ["decode_check.cpp"],
+    data = select({
+        "@platforms//os:linux": ["@vulkan_loader//:libvulkan.so.1"],
+        "//conditions:default": [],
+    }),
+    target_compatible_with = select({
+        "@platforms//os:macos": ["@platforms//:incompatible"],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":demux",
+        ":nri_video_source",
+        "//device",
+        "@nlohmann_json//:json",
+        "@nri",
+        "@spdlog",
+    ],
+)
+
+# The demuxer and the parsers on the test clips: sample tables, AV1 frame headers (against ffmpeg's trace), H.264 and
+# H.265 parameter sets and picture order.
+cc_test(
+    name = "demux_test",
+    size = "small",
+    srcs = ["demux_test.cpp"],
+    args = ["renderer/clips/testdata"],
+    data = ["//renderer/clips/testdata:clips"],
+    deps = [
+        ":codec_backends",
+        ":demux",
+    ],
+)

@@ -1,0 +1,199 @@
+A wrapped Vulkan device whose enabled features are not known (a Vulkan game's, which the provider cannot query):
+DeviceCreationVKDesc::unknownFeatures. NRI then reads no feature as supported (so no device addresses, maintenance4 or
+extended dynamic state) and uses Vulkan 1.0's copies; where "synchronization2" is off it records barriers and
+timestamps with Vulkan 1.0's vkCmdPipelineBarrier and vkCmdWriteTimestamp instead of requiring it. Queue submissions
+stay vkQueueSubmit2 (a provider in a game submits nothing on the game's device). Applied after nri_subgroup_size.patch.
+
+diff -ru a/Include/Extensions/NRIWrapperVK.h b/Include/Extensions/NRIWrapperVK.h
+--- a/Include/Extensions/NRIWrapperVK.h	2026-11-11 03:44:43.911193780 -0700
++++ b/Include/Extensions/NRIWrapperVK.h	2026-11-11 03:44:43.913973912 -0700
+@@ -39,6 +39,7 @@
+     // Switches (disabled by default)
+     bool enableNRIValidation;
+     bool enableMemoryZeroInitialization;                // page-clears are fast, but memory is not cleared by default in VK
++    bool unknownFeatures;                               // the device's enabled features are not known: none are used (no device addresses), and barriers, timestamps and copies are Vulkan 1.0's
+ };
+ 
+ NriStruct(CommandAllocatorVKDesc) {
+diff -ru a/Source/VK/CommandBufferVK.hpp b/Source/VK/CommandBufferVK.hpp
+--- a/Source/VK/CommandBufferVK.hpp	2026-11-11 03:44:43.915380543 -0700
++++ b/Source/VK/CommandBufferVK.hpp	2026-11-11 03:44:43.917145820 -0700
+@@ -354,6 +354,40 @@
+     }
+ }
+ 
++// Vulkan 1.0's barrier flags and layouts for "synchronization2"'s (devices without it): the bits below 32 are the same
++static inline VkPipelineStageFlags GetPipelineStageFlags1(VkPipelineStageFlags2 stages) {
++    VkPipelineStageFlags flags = (VkPipelineStageFlags)(stages & 0xFFFFFFFFull);
++
++    if (stages & (VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_RESOLVE_BIT | VK_PIPELINE_STAGE_2_BLIT_BIT | VK_PIPELINE_STAGE_2_CLEAR_BIT))
++        flags |= VK_PIPELINE_STAGE_TRANSFER_BIT;
++    if (stages & (VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT | VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT))
++        flags |= VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
++    if (stages & VK_PIPELINE_STAGE_2_PRE_RASTERIZATION_SHADERS_BIT)
++        flags |= VK_PIPELINE_STAGE_VERTEX_SHADER_BIT;
++
++    return flags;
++}
++
++static inline VkAccessFlags GetAccessFlags1(VkAccessFlags2 access) {
++    VkAccessFlags flags = (VkAccessFlags)(access & 0xFFFFFFFFull);
++
++    if (access & (VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT))
++        flags |= VK_ACCESS_SHADER_READ_BIT;
++    if (access & VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT)
++        flags |= VK_ACCESS_SHADER_WRITE_BIT;
++
++    return flags;
++}
++
++static inline VkImageLayout GetImageLayout1(VkImageLayout layout, bool depthStencil) {
++    if (layout == VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL)
++        return depthStencil ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
++    if (layout == VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL)
++        return depthStencil ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
++
++    return layout;
++}
++
+ static inline VkAccessFlags2 GetAccessFlags(AccessBits accessBits) {
+     VkAccessFlags2 flags = VK_ACCESS_2_NONE; // = 0
+ 
+@@ -2715,6 +2749,45 @@
+             isRegionLocal = true;
+     }
+ 
++    // Without "synchronization2" (a wrapped device with unknown features): Vulkan 1.0's barrier, its stages the union of all
++    if (!m_Device.m_IsSupported.synchronization2) {
++        VkPipelineStageFlags srcStages = 0;
++        VkPipelineStageFlags dstStages = 0;
++        Scratch<VkMemoryBarrier> memoryBarriers1 = NRI_ALLOCATE_SCRATCH(m_Device, VkMemoryBarrier, barrierDesc.globalNum);
++        for (uint32_t i = 0; i < barrierDesc.globalNum; i++) {
++            const VkMemoryBarrier2& in = memoryBarriers[i];
++            memoryBarriers1[i] = {VK_STRUCTURE_TYPE_MEMORY_BARRIER, nullptr, GetAccessFlags1(in.srcAccessMask), GetAccessFlags1(in.dstAccessMask)};
++            srcStages |= GetPipelineStageFlags1(in.srcStageMask);
++            dstStages |= GetPipelineStageFlags1(in.dstStageMask);
++        }
++
++        Scratch<VkBufferMemoryBarrier> bufferBarriers1 = NRI_ALLOCATE_SCRATCH(m_Device, VkBufferMemoryBarrier, barrierDesc.bufferNum);
++        for (uint32_t i = 0; i < barrierDesc.bufferNum; i++) {
++            const VkBufferMemoryBarrier2& in = bufferBarriers[i];
++            bufferBarriers1[i] = {VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER, nullptr, GetAccessFlags1(in.srcAccessMask), GetAccessFlags1(in.dstAccessMask),
++                in.srcQueueFamilyIndex, in.dstQueueFamilyIndex, in.buffer, in.offset, in.size};
++            srcStages |= GetPipelineStageFlags1(in.srcStageMask);
++            dstStages |= GetPipelineStageFlags1(in.dstStageMask);
++        }
++
++        Scratch<VkImageMemoryBarrier> textureBarriers1 = NRI_ALLOCATE_SCRATCH(m_Device, VkImageMemoryBarrier, barrierDesc.textureNum);
++        for (uint32_t i = 0; i < barrierDesc.textureNum; i++) {
++            const VkImageMemoryBarrier2& in = textureBarriers[i];
++            const bool depthStencil = (in.subresourceRange.aspectMask & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) != 0;
++            textureBarriers1[i] = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, nullptr, GetAccessFlags1(in.srcAccessMask), GetAccessFlags1(in.dstAccessMask),
++                GetImageLayout1(in.oldLayout, depthStencil), GetImageLayout1(in.newLayout, depthStencil), in.srcQueueFamilyIndex, in.dstQueueFamilyIndex,
++                in.image, in.subresourceRange};
++            srcStages |= GetPipelineStageFlags1(in.srcStageMask);
++            dstStages |= GetPipelineStageFlags1(in.dstStageMask);
++        }
++
++        const auto& vk = m_Device.GetDispatchTable();
++        vk.CmdPipelineBarrier(m_Handle, srcStages ? srcStages : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, dstStages ? dstStages : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
++            isRegionLocal ? VK_DEPENDENCY_BY_REGION_BIT : 0, barrierDesc.globalNum, memoryBarriers1, barrierDesc.bufferNum, bufferBarriers1,
++            barrierDesc.textureNum, textureBarriers1);
++        return;
++    }
++
+     // Submit
+     VkDependencyInfo dependencyInfo = {VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+     dependencyInfo.memoryBarrierCount = barrierDesc.globalNum;
+@@ -2744,7 +2817,10 @@
+     if (queryPoolVK.GetType() == VK_QUERY_TYPE_TIMESTAMP) {
+         // TODO: https://registry.khronos.org/vulkan/specs/latest/man/html/vkCmdWriteTimestamp.html
+         // https://docs.vulkan.org/samples/latest/samples/api/timestamp_queries/README.html
+-        vk.CmdWriteTimestamp2(m_Handle, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, queryPoolVK.GetHandle(), offset);
++        if (m_Device.m_IsSupported.synchronization2)
++            vk.CmdWriteTimestamp2(m_Handle, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, queryPoolVK.GetHandle(), offset);
++        else
++            vk.CmdWriteTimestamp(m_Handle, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, queryPoolVK.GetHandle(), offset);
+     } else
+         vk.CmdEndQuery(m_Handle, queryPoolVK.GetHandle(), offset);
+ }
+diff -ru a/Source/VK/DeviceVK.h b/Source/VK/DeviceVK.h
+--- a/Source/VK/DeviceVK.h	2026-11-11 03:44:43.919526406 -0700
++++ b/Source/VK/DeviceVK.h	2026-11-11 03:44:43.922249356 -0700
+@@ -134,6 +134,7 @@
+     uint32_t videoEncodeAV1               : 1;
+     uint32_t descriptorHeap               : 1;
+     uint32_t imageView2DOn3D              : 1;
++    uint32_t synchronization2             : 1;
+ };
+ 
+ static_assert(sizeof(IsSupported) == sizeof(uint32_t), "4 bytes expected");
+diff -ru a/Source/VK/DeviceVK.hpp b/Source/VK/DeviceVK.hpp
+--- a/Source/VK/DeviceVK.hpp	2026-11-11 03:44:43.924476580 -0700
++++ b/Source/VK/DeviceVK.hpp	2026-11-11 03:44:43.930933977 -0700
+@@ -1005,7 +1005,10 @@
+     if (desc.deviceLostInfoLevel != DeviceLostInfoLevel::NONE && IsExtensionSupported(VK_EXT_DEVICE_FAULT_EXTENSION_NAME, desiredDeviceExts))
+         PNEXTCHAIN_APPEND_STRUCT(DeviceFaultFeatures);
+ 
+-    m_VK.GetPhysicalDeviceFeatures2(m_PhysicalDevice, &features);
++    // A wrapped device with unknown features: every structure stays zero (none is used)
++    const bool unknownFeatures = isWrapper && descVK.unknownFeatures;
++    if (!unknownFeatures)
++        m_VK.GetPhysicalDeviceFeatures2(m_PhysicalDevice, &features);
+ 
+     if (m_MinorVersion < 3) {
+         features13.dynamicRendering = DynamicRenderingFeatures.dynamicRendering;
+@@ -1030,7 +1033,7 @@
+         features14.hostImageCopy = HostImageCopyFeatures.hostImageCopy;
+     }
+ 
+-    if (m_MinorVersion > 2)
++    if (m_MinorVersion > 2 && !unknownFeatures)
+         ExtendedDynamicStateFeatures.extendedDynamicState = true;
+ 
+     m_IsSupported.maintenance4 = features13.maintenance4;
+@@ -1042,11 +1045,12 @@
+     m_IsSupported.maintenance10 = Maintenance10Features.maintenance10;
+     m_IsSupported.deviceAddress = features12.bufferDeviceAddress;
+     m_IsSupported.dynamicRendering = features13.dynamicRendering;
+-    m_IsSupported.storeOpNone = m_MinorVersion >= 3 ||
++    m_IsSupported.storeOpNone = (m_MinorVersion >= 3 && !unknownFeatures) ||
+         IsExtensionSupported(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME, desiredDeviceExts) ||
+         IsExtensionSupported(VK_KHR_LOAD_STORE_OP_NONE_EXTENSION_NAME, desiredDeviceExts) ||
+         IsExtensionSupported(VK_EXT_LOAD_STORE_OP_NONE_EXTENSION_NAME, desiredDeviceExts);
+-    m_IsSupported.copyCommands2 = m_MinorVersion > 2 || IsExtensionSupported(VK_KHR_COPY_COMMANDS_2_EXTENSION_NAME, desiredDeviceExts);
++    m_IsSupported.copyCommands2 = !unknownFeatures && (m_MinorVersion > 2 || IsExtensionSupported(VK_KHR_COPY_COMMANDS_2_EXTENSION_NAME, desiredDeviceExts));
++    m_IsSupported.synchronization2 = features13.synchronization2;
+     m_IsSupported.swapChainMutableFormat = IsExtensionSupported(VK_KHR_SWAPCHAIN_MUTABLE_FORMAT_EXTENSION_NAME, desiredDeviceExts);
+     m_IsSupported.presentId = PresentIdFeatures.presentId;
+     m_IsSupported.memoryPriority = MemoryPriorityFeatures.memoryPriority;
+@@ -1075,7 +1079,7 @@
+     m_IsMemoryZeroInitializationEnabled = desc.enableMemoryZeroInitialization && ZeroInitializeDeviceMemoryFeatures.zeroInitializeDeviceMemory;
+ 
+     // Check hard requirements
+-    NRI_RETURN_ON_FAILURE(this, features13.synchronization2, Result::UNSUPPORTED, "'synchronization2' is not supported");
++    NRI_RETURN_ON_FAILURE(this, features13.synchronization2 || unknownFeatures, Result::UNSUPPORTED, "'synchronization2' is not supported");
+ 
+     // Check soft requirement
+     if (!ExtendedDynamicStateFeatures.extendedDynamicState)
+@@ -2424,6 +2428,8 @@
+     GET_DEVICE_CORE_FUNC(CmdCopyImageToBuffer);
+     GET_DEVICE_CORE_FUNC(CmdResetQueryPool);
+     GET_DEVICE_CORE_FUNC(CmdFillBuffer);
++    GET_DEVICE_CORE_FUNC(CmdPipelineBarrier);
++    GET_DEVICE_CORE_FUNC(CmdWriteTimestamp);
+     GET_DEVICE_CORE_FUNC(CmdBeginRenderPass);
+     GET_DEVICE_CORE_FUNC(CmdEndRenderPass);
+     GET_DEVICE_CORE_FUNC(EndCommandBuffer);
+diff -ru a/Source/VK/DispatchTable.h b/Source/VK/DispatchTable.h
+--- a/Source/VK/DispatchTable.h	2026-11-11 03:44:43.935442754 -0700
++++ b/Source/VK/DispatchTable.h	2026-11-11 03:44:43.938132255 -0700
+@@ -143,6 +143,8 @@
+     VK_FUNC(CmdCopyImageToBuffer);                        // - | +
+     VK_FUNC(CmdResetQueryPool);                           // - | +
+     VK_FUNC(CmdFillBuffer);                               // - | +
++    VK_FUNC(CmdPipelineBarrier);                          // - | +
++    VK_FUNC(CmdWriteTimestamp);                           // - | +
+     VK_FUNC(CmdBeginRenderPass);                          // - | +
+     VK_FUNC(CmdEndRenderPass);                            // - | +
+     VK_FUNC(EndCommandBuffer);                            // - | +

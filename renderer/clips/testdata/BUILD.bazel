@@ -1,0 +1,9 @@
+# Tiny clips for the video decoder's tests (generate.sh makes them; av1_expected.py prints the AV1 header table the
+# demux test checks against).
+exports_files(glob(["*.mp4"]) + ["generate.sh", "av1_expected.py"], visibility = ["//visibility:public"])
+
+filegroup(
+    name = "clips",
+    srcs = glob(["*.mp4"]) + ["generate.sh"],
+    visibility = ["//visibility:public"],
+)

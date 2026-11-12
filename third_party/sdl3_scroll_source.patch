@@ -1,0 +1,200 @@
+diff --git a/include/SDL3/SDL_events.h b/include/SDL3/SDL_events.h
+--- a/include/SDL3/SDL_events.h
++++ b/include/SDL3/SDL_events.h
+@@ -503,6 +503,7 @@ typedef struct SDL_MouseWheelEvent
+     float mouse_y;      /**< Y coordinate, relative to window */
+     Sint32 integer_x;   /**< The amount scrolled horizontally, accumulated to whole scroll "ticks" (added in 3.2.12) */
+     Sint32 integer_y;   /**< The amount scrolled vertically, accumulated to whole scroll "ticks" (added in 3.2.12) */
++    bool touchpad;     /**< NR extension: OS-identified touch-surface scrolling, not inferred from delta size. */
+ } SDL_MouseWheelEvent;
+ 
+ /**
+diff --git a/src/events/SDL_mouse.c b/src/events/SDL_mouse.c
+--- a/src/events/SDL_mouse.c
++++ b/src/events/SDL_mouse.c
+@@ -1032,6 +1032,11 @@ void SDL_SendMouseButton(Uint64 timestamp, SDL_Window *window, SDL_MouseID mouse
+ }
+ 
+ void SDL_SendMouseWheel(Uint64 timestamp, SDL_Window *window, SDL_MouseID mouseID, float x, float y, SDL_MouseWheelDirection direction)
++{
++    SDL_SendMouseWheelWithSource(timestamp, window, mouseID, x, y, direction, false);
++}
++
++void SDL_SendMouseWheelWithSource(Uint64 timestamp, SDL_Window *window, SDL_MouseID mouseID, float x, float y, SDL_MouseWheelDirection direction, bool touchpad)
+ {
+     SDL_Mouse *mouse = SDL_GetMouse();
+ 
+@@ -1058,6 +1063,7 @@ void SDL_SendMouseWheel(Uint64 timestamp, SDL_Window *window, SDL_MouseID mouseI
+         event.wheel.windowID = mouse->focus ? mouse->focus->id : 0;
+         event.wheel.which = mouseID;
+         event.wheel.direction = direction;
++        event.wheel.touchpad = touchpad;
+         event.wheel.mouse_x = mouse->x;
+         event.wheel.mouse_y = mouse->y;
+ 
+diff --git a/src/events/SDL_mouse_c.h b/src/events/SDL_mouse_c.h
+--- a/src/events/SDL_mouse_c.h
++++ b/src/events/SDL_mouse_c.h
+@@ -218,6 +218,7 @@ extern void SDL_SendMouseButtonClicks(Uint64 timestamp, SDL_Window *window, SDL_
+ 
+ // Send a mouse wheel event
+ extern void SDL_SendMouseWheel(Uint64 timestamp, SDL_Window *window, SDL_MouseID mouseID, float x, float y, SDL_MouseWheelDirection direction);
++extern void SDL_SendMouseWheelWithSource(Uint64 timestamp, SDL_Window *window, SDL_MouseID mouseID, float x, float y, SDL_MouseWheelDirection direction, bool touchpad);
+ 
+ // Warp the mouse within the window, potentially overriding relative mode
+ extern void SDL_PerformWarpMouseInWindow(SDL_Window *window, float x, float y, bool ignore_relative_mode);
+diff --git a/src/video/cocoa/SDL_cocoamouse.m b/src/video/cocoa/SDL_cocoamouse.m
+--- a/src/video/cocoa/SDL_cocoamouse.m
++++ b/src/video/cocoa/SDL_cocoamouse.m
+@@ -644,7 +644,8 @@ void Cocoa_HandleMouseWheel(SDL_Window *window, NSEvent *event)
+         }
+     }
+ 
+-    SDL_SendMouseWheel(Cocoa_GetEventTimestamp([event timestamp]), window, mouseID, x, y, direction);
++    // Precise deltas identify touch surfaces (trackpad and Magic Mouse), including integer-valued gestures.
++    SDL_SendMouseWheelWithSource(Cocoa_GetEventTimestamp([event timestamp]), window, mouseID, x, y, direction, [event hasPreciseScrollingDeltas]);
+ }
+ 
+ void Cocoa_HandleMouseWarp(CGFloat x, CGFloat y)
+diff --git a/src/video/wayland/SDL_waylandevents.c b/src/video/wayland/SDL_waylandevents.c
+--- a/src/video/wayland/SDL_waylandevents.c
++++ b/src/video/wayland/SDL_waylandevents.c
+@@ -1236,8 +1236,9 @@ static void pointer_dispatch_axis(SDL_WaylandSeat *seat)
+         break;
+     }
+ 
+-    SDL_SendMouseWheel(seat->pointer.pending_frame.timestamp_ns,
+-                       seat->pointer.focus->sdlwindow, seat->pointer.sdl_id, x, y, direction);
++    SDL_SendMouseWheelWithSource(seat->pointer.pending_frame.timestamp_ns,
++                       seat->pointer.focus->sdlwindow, seat->pointer.sdl_id, x, y, direction,
++                       seat->pointer.pending_frame.axis.touchpad);
+ }
+ 
+ static void pointer_handle_frame(void *data, struct wl_pointer *pointer)
+@@ -1277,7 +1278,8 @@ static void pointer_handle_frame(void *data, struct wl_pointer *pointer)
+ static void pointer_handle_axis_source(void *data, struct wl_pointer *pointer,
+                                        uint32_t axis_source)
+ {
+-    // unimplemented
++    SDL_WaylandSeat *seat = data;
++    seat->pointer.pending_frame.axis.touchpad = (axis_source == WL_POINTER_AXIS_SOURCE_FINGER);
+ }
+ 
+ static void pointer_handle_axis_stop(void *data, struct wl_pointer *pointer,
+diff --git a/src/video/wayland/SDL_waylandevents_c.h b/src/video/wayland/SDL_waylandevents_c.h
+--- a/src/video/wayland/SDL_waylandevents_c.h
++++ b/src/video/wayland/SDL_waylandevents_c.h
+@@ -232,6 +232,7 @@ typedef struct SDL_WaylandSeat
+                 float y;
+ 
+                 SDL_MouseWheelDirection direction;
++                bool touchpad;
+             } axis;
+ 
+             // Event timestamp in nanoseconds
+diff --git a/src/video/windows/SDL_windowsevents.c b/src/video/windows/SDL_windowsevents.c
+--- a/src/video/windows/SDL_windowsevents.c
++++ b/src/video/windows/SDL_windowsevents.c
+@@ -1535,10 +1535,12 @@ LRESULT CALLBACK WIN_WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
+     {
+         short amount = GET_WHEEL_DELTA_WPARAM(wParam);
+         float fAmount = (float)amount / WHEEL_DELTA;
++        INPUT_MESSAGE_SOURCE source;
++        const bool touchpad = GetCurrentInputMessageSource(&source) && source.deviceType == IMDT_TOUCHPAD;
+         if (msg == WM_MOUSEWHEEL) {
+-            SDL_SendMouseWheel(WIN_GetEventTimestamp(), data->window, SDL_GLOBAL_MOUSE_ID, 0.0f, fAmount, SDL_MOUSEWHEEL_NORMAL);
++            SDL_SendMouseWheelWithSource(WIN_GetEventTimestamp(), data->window, SDL_GLOBAL_MOUSE_ID, 0.0f, fAmount, SDL_MOUSEWHEEL_NORMAL, touchpad);
+         } else {
+-            SDL_SendMouseWheel(WIN_GetEventTimestamp(), data->window, SDL_GLOBAL_MOUSE_ID, fAmount, 0.0f, SDL_MOUSEWHEEL_NORMAL);
++            SDL_SendMouseWheelWithSource(WIN_GetEventTimestamp(), data->window, SDL_GLOBAL_MOUSE_ID, fAmount, 0.0f, SDL_MOUSEWHEEL_NORMAL, touchpad);
+         }
+     } break;
+ 
+diff --git a/src/video/x11/SDL_x11xinput2.c b/src/video/x11/SDL_x11xinput2.c
+--- a/src/video/x11/SDL_x11xinput2.c
++++ b/src/video/x11/SDL_x11xinput2.c
+@@ -73,6 +73,7 @@ typedef struct
+ {
+     int scroll_info_count;
+     SDL_XInput2ScrollInfo *scroll_info;
++    bool touchpad;
+ } SDL_XInput2ScrollableDevice;
+ #endif
+ 
+@@ -92,6 +93,7 @@ typedef struct SDL_XInput2DeviceInfo
+     SDL_XInput2RelativeDevice relative;
+ #ifdef SDL_VIDEO_DRIVER_X11_XINPUT2_SUPPORTS_SCROLLINFO
+     SDL_XInput2ScrollableDevice scroll;
++    bool touchpad_property;
+ #endif
+     struct SDL_XInput2DeviceInfo *next;
+ } SDL_XInput2DeviceInfo;
+@@ -190,7 +192,7 @@ static void xinput2_parse_scrollable_valuators(SDL_XInput2ScrollableDevice *scro
+                     const double y = info->scroll_type == XIScrollTypeVertical ? delta : 0;
+ 
+                     SDL_Mouse *mouse = SDL_GetMouse();
+-                    SDL_SendMouseWheel(xev->time, mouse->focus, (SDL_MouseID)xev->sourceid, (float)-x, (float)y, SDL_MOUSEWHEEL_NORMAL);
++                    SDL_SendMouseWheelWithSource(xev->time, mouse->focus, (SDL_MouseID)xev->sourceid, (float)-x, (float)y, SDL_MOUSEWHEEL_NORMAL, scroll_dev->touchpad);
+                 }
+                 info->prev_value = current_val;
+                 info->prev_value_valid = true;
+@@ -415,9 +417,15 @@ static void xinput2_update_device_info(SDL_XInput2DeviceInfo *devinfo, XIAnyClas
+     // Don't unnecessarily reallocate the array.
+     int allocated_scroll_info_count = devinfo->scroll.scroll_info_count;
+     devinfo->scroll.scroll_info_count = 0;
++    devinfo->scroll.touchpad = devinfo->touchpad_property;
+ #endif
+ 
+     for (int i = 0; i < num_classes; ++i) {
++#if defined(SDL_VIDEO_DRIVER_X11_XINPUT2_SUPPORTS_SCROLLINFO) && defined(SDL_VIDEO_DRIVER_X11_XINPUT2_SUPPORTS_MULTITOUCH)
++        if (classes[i]->type == XITouchClass && ((XITouchClassInfo *)classes[i])->mode == XIDependentTouch) {
++            devinfo->scroll.touchpad = true;
++        }
++#endif
+         if (classes[i]->type == XIValuatorClass) {
+             /* Search for relative axes with the following priority:
+              *  - Labelled 'Rel X'/'Rel Y'
+@@ -500,6 +508,33 @@ static SDL_XInput2DeviceInfo *xinput2_get_cached_device_info(const int device_id
+     return NULL;
+ }
+ 
++#ifdef SDL_VIDEO_DRIVER_X11_XINPUT2_SUPPORTS_SCROLLINFO
++static bool xinput2_has_touchpad_property(SDL_VideoData *videodata, int device_id)
++{
++    // Xorg touchpad drivers do not all expose XIDependentTouch. These properties exist only on touchpads;
++    // a disabled tapping setting still identifies the device. No name matching or delta-size heuristic.
++    const char *properties[] = {"libinput Tapping Enabled", "Synaptics Capabilities"};
++    for (int i = 0; i < SDL_arraysize(properties); ++i) {
++        const Atom property = X11_XInternAtom(videodata->display, properties[i], True);
++        if (property != None) {
++            Atom type = None;
++            int format;
++            unsigned long items, remaining;
++            unsigned char *value = NULL;
++            const int status = X11_XIGetProperty(videodata->display, device_id, property, 0, 0, False,
++                                               AnyPropertyType, &type, &format, &items, &remaining, &value);
++            if (value) {
++                X11_XFree(value);
++            }
++            if (status == Success && type != None) {
++                return true;
++            }
++        }
++    }
++    return false;
++}
++#endif
++
+ static SDL_XInput2DeviceInfo *xinput2_get_device_info(SDL_VideoData *videodata, const int device_id)
+ {
+     // Cache device info as we see new devices.
+@@ -521,6 +556,9 @@ static SDL_XInput2DeviceInfo *xinput2_get_device_info(SDL_VideoData *videodata,
+         return NULL;
+     }
+ 
++#ifdef SDL_VIDEO_DRIVER_X11_XINPUT2_SUPPORTS_SCROLLINFO
++    devinfo->touchpad_property = xinput2_has_touchpad_property(videodata, device_id);
++#endif
+     xinput2_update_device_info(devinfo, xidevinfo->classes, xidevinfo->num_classes);
+     X11_XIFreeDeviceInfo(xidevinfo);
+ 

@@ -1,0 +1,47 @@
+load("@rules_cc//cc:defs.bzl", "cc_binary")
+
+# Build platforms and the shader rules' tools (slang.bzl).
+
+# Windows builds with clang-cl (.bazelrc: build:windows): Bazel's auto-configured clang-cl toolchain needs an
+# execution platform with this constraint.
+platform(
+    name = "windows_clang_cl",
+    constraint_values = [
+        "@platforms//cpu:x86_64",
+        "@platforms//os:windows",
+        "@rules_cc//cc/private/toolchain:clang-cl",
+    ],
+)
+
+# slangc for the build host (MODULE.bazel: one Slang archive per OS).
+alias(
+    name = "slangc",
+    actual = select({
+        "@platforms//os:macos": "@slang_macos//:bin/slangc",
+        "@platforms//os:windows": "@slang_windows//:bin/slangc.exe",
+        "//conditions:default": "@slang//:bin/slangc",
+    }),
+)
+
+alias(
+    name = "slang_files",
+    actual = select({
+        "@platforms//os:macos": "@slang_macos//:files",
+        "@platforms//os:windows": "@slang_windows//:files",
+        "//conditions:default": "@slang//:files",
+    }),
+)
+
+# Writes a file as a C array (unsigned char <name>[] = {...};): NRI's Metal shaders, embedded in NRI.
+cc_binary(
+    name = "embed",
+    srcs = ["embed.cpp"],
+    visibility = ["//visibility:public"],
+)
+
+# Removes names and debug data from SPIR-V (slang.bzl runs it on every module).
+cc_binary(
+    name = "spirv_strip",
+    srcs = ["spirv_strip.cpp"],
+    visibility = ["//visibility:public"],
+)

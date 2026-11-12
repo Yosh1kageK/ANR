@@ -1,0 +1,48 @@
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
+
+# nr-replay and nr-video (README.md): frame generation implementations run on nr-record recordings, and videos and
+# images of their frames. Each implementation is a DLL the user gives; nothing here runs a model.
+
+package(default_visibility = ["//visibility:public"])
+
+# Raw frames, the frame stream and the SDR curve (both tools).
+cc_library(
+    name = "frames",
+    srcs = ["frames.cpp"],
+    hdrs = ["frames.h"],
+    deps = ["@nlohmann_json//:json"],
+)
+
+# Windows (D3D12): natively, or under Wine with vkd3d-proton (nr_replay_wine.py).
+cc_binary(
+    name = "nr-replay",
+    srcs = [
+        "generator.h",
+        "ngx_generator.cpp",
+        "nr_replay.cpp",
+        "sha256.h",
+    ],
+    linkopts = [
+        "advapi32.lib",
+        "d3d12.lib",
+        "dxgi.lib",
+        "version.lib",
+    ],
+    target_compatible_with = ["@platforms//os:windows"],
+    deps = [
+        ":frames",
+        "//record:reader",
+        "@dlss//:headers",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_binary(
+    name = "nr-video",
+    srcs = ["nr_video.cpp"],
+    deps = [
+        ":frames",
+        "//record:format",
+        "@nlohmann_json//:json",
+    ],
+)

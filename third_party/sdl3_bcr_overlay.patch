@@ -1,0 +1,1751 @@
+diff --git a/.bazelignore b/.bazelignore
+new file mode 100644
+--- /dev/null
++++ b/.bazelignore
+@@ -0,0 +1 @@
++test_module
+diff --git a/BUILD.bazel b/BUILD.bazel
+new file mode 100644
+--- /dev/null
++++ b/BUILD.bazel
+@@ -0,0 +1,537 @@
++"""SDL3 built from source with rules_cc, linked statically."""
++
++load("@rules_cc//cc:defs.bzl", "cc_library")
++load("@rules_cc_autoconf//autoconf:autoconf.bzl", "autoconf")
++load("@rules_cc_autoconf//autoconf:autoconf_hdr.bzl", "autoconf_hdr")
++load(":cc_headers_only.bzl", "cc_headers_only")
++load(":objc_wrappers.bzl", "objc_wrappers")
++load(
++    ":sdl3_config_checks.bzl",
++    "SDL3_CONFIG_CHECKS_COMPILER",
++    "SDL3_CONFIG_CHECKS_LIBC",
++    "SDL3_CONFIG_CHECKS_LINUX",
++)
++load(":wayland_protocols.bzl", "wayland_protocol_sources")
++
++package(default_visibility = ["//visibility:private"])
++
++exports_files(["LICENSE.txt"])
++
++_VERSION = module_version().split(".")
++
++# SDL.c asserts at compile time that the headers match this version.
++_VERSION_DEFINES = [
++    "SDL_BUILD_MAJOR_VERSION=" + _VERSION[0],
++    "SDL_BUILD_MINOR_VERSION=" + _VERSION[1],
++    "SDL_BUILD_MICRO_VERSION=" + _VERSION[2],
++] if len(_VERSION) >= 3 else []
++
++_LOCAL_DEFINES = ["SDL_STATIC_LIB"] + _VERSION_DEFINES
++
++# CMake enables the Steam storage backend on Windows and macOS; the build
++# configs SDL ships for them do not.
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/CMakeLists.txt#L2397-L2401
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/CMakeLists.txt#L2663-L2669
++_STEAM_DEFINES = ["SDL_STORAGE_STEAM=1"]
++
++# layering_check: SDL includes X11 headers from modules it does not depend on
++# directly (X11/keysym.h from xorgproto). parse_headers: a C compiler cannot
++# parse the Objective-C headers under src/.
++_FEATURES = [
++    "-layering_check",
++    "-parse_headers",
++]
++
++# -w: SDL builds as someone else's dependency here, where its warnings are noise.
++# -fno-strict-aliasing is correctness, not warnings: SDL's code relies on it.
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/cmake/sdlcompilers.cmake#L80-L83
++_COPTS = select({
++    "@rules_cc//cc/compiler:clang-cl": ["/w"],
++    "@rules_cc//cc/compiler:msvc-cl": ["/w"],
++    "//conditions:default": [
++        "-w",
++        "-fno-strict-aliasing",
++    ],
++})
++
++# DEBUG in debug builds, as upstream defines it for its Debug configuration.
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/CMakeLists.txt#L484
++config_setting(
++    name = "debug_build",
++    values = {"compilation_mode": "dbg"},
++)
++
++_DEBUG_DEFINES = select({
++    ":debug_build": ["DEBUG"],
++    "//conditions:default": [],
++})
++
++# Large files and a 64-bit time_t, which upstream sets on 32-bit Linux only.
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/CMakeLists.txt#L512-L519
++[
++    config_setting(
++        name = "linux_" + cpu,
++        constraint_values = [
++            "@platforms//os:linux",
++            "@platforms//cpu:" + cpu,
++        ],
++    )
++    for cpu in [
++        "armv7",
++        "x86_32",
++    ]
++]
++
++_LARGE_FILE_DEFINES = select({
++    ":linux_armv7": [
++        "_FILE_OFFSET_BITS=64",
++        "_TIME_BITS=64",
++    ],
++    ":linux_x86_32": [
++        "_FILE_OFFSET_BITS=64",
++        "_TIME_BITS=64",
++    ],
++    "//conditions:default": [],
++})
++
++_SUPPORTED_OS = select({
++    "@platforms//os:linux": [],
++    "@platforms//os:macos": [],
++    "@platforms//os:windows": [],
++    "//conditions:default": ["@platforms//:incompatible"],
++})
++
++cc_library(
++    name = "sdl3_headers",
++    hdrs = glob(["include/SDL3/*.h"]),
++    includes = ["include"],
++    visibility = ["//visibility:public"],
++)
++
++# SDL_internal.h includes "SDL_build_config.h"; the shipped one under
++# include/build_config/ dispatches to the Windows and Apple configs.
++cc_library(
++    name = "build_config_shipped",
++    hdrs = glob(["include/build_config/*.h"]),
++    strip_include_prefix = "include/build_config",
++)
++
++# Linux-only, so a wildcard build does not run the probes elsewhere.
++_LINUX_ONLY = ["@platforms//os:linux"]
++
++autoconf(
++    name = "autoconf",
++    checks = SDL3_CONFIG_CHECKS_LIBC + SDL3_CONFIG_CHECKS_COMPILER + SDL3_CONFIG_CHECKS_LINUX,
++    target_compatible_with = _LINUX_ONLY,
++)
++
++# autoconf_hdr fills autoheader-style `#undef NAME` lines, which is what
++# CMake's `#cmakedefine NAME ...` becomes here; `@VAR@` is substituted below.
++genrule(
++    name = "build_config_h_in",
++    srcs = ["include/build_config/SDL_build_config.h.cmake"],
++    outs = ["bazel/SDL_build_config.h.in"],
++    cmd = "sed -E 's/^#cmakedefine ([A-Za-z0-9_]+).*$$/#undef \\1/' $< > $@",
++    target_compatible_with = _LINUX_ONLY,
++)
++
++autoconf_hdr(
++    name = "config_h",
++    out = "bazel/linux/SDL_build_config.h",
++    substitutions = {
++        # Not the headers' version: these decide which libxkbcommon symbols SDL
++        # demands from the library it dlopens, and a missing one disables the
++        # Wayland driver at runtime with no diagnostic. 0.5.0 is SDL's floor.
++        # https://github.com/libsdl-org/SDL/blob/release-3.4.18/src/video/wayland/SDL_waylandsym.h#L164-L174
++        "@SDL_XKBCOMMON_VERSION_MAJOR@": "0",
++        "@SDL_XKBCOMMON_VERSION_MINOR@": "5",
++        "@SDL_XKBCOMMON_VERSION_PATCH@": "0",
++        "@SDL_LIBDECOR_VERSION_MAJOR@": "0",
++        "@SDL_LIBDECOR_VERSION_MINOR@": "0",
++        "@SDL_LIBDECOR_VERSION_PATCH@": "0",
++        # Only read under SDL_DEFAULT_ASSERT_LEVEL_CONFIGURED, which is off.
++        "@SDL_DEFAULT_ASSERT_LEVEL@": "",
++    },
++    target_compatible_with = _LINUX_ONLY,
++    template = ":build_config_h_in",
++    deps = [":autoconf"],
++)
++
++cc_library(
++    name = "build_config_linux",
++    hdrs = [":config_h"],
++    strip_include_prefix = "bazel/linux",
++    target_compatible_with = _LINUX_ONLY,
++)
++
++# The EGL, GLES and Vulkan headers SDL vendors. Upstream adds them with
++# -idirafter, so installed system copies win there; here they always win.
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/CMakeLists.txt#L554-L558
++cc_library(
++    name = "khronos_headers",
++    hdrs = glob(["src/video/khronos/**/*.h"]),
++    strip_include_prefix = "src/video/khronos",
++)
++
++# SDL's sources include each other by bare name and by paths relative to src/.
++cc_library(
++    name = "private_headers",
++    hdrs = glob(
++        ["src/**/*.h"],
++        exclude = ["src/video/khronos/**"],
++    ),
++    features = _FEATURES,
++    strip_include_prefix = "src",
++    # .c files SDL includes textually (test/testevdev.c includes the first),
++    # and the Objective-C sources, which sdl3_macos_objc's wrappers include.
++    textual_hdrs = [
++        "src/core/linux/SDL_evdev_capabilities.c",
++        "src/hidapi/mac/hid.c",
++        "src/hidapi/windows/hid.c",
++        "src/hidapi/windows/hidapi_descriptor_reconstruct.c",
++        "src/thread/generic/SDL_syssem.c",
++    ] + glob(["src/**/*.m"]),
++    deps = [":sdl3_headers"],
++)
++
++# Compiled everywhere: the backend files under these directories select
++# themselves with the build config's SDL_* macros, as SDL's CMake globs do.
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/CMakeLists.txt#L1235-L1294
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/CMakeLists.txt#L3539-L3582
++_COMMON_SRCS = glob([
++    "src/*.c",
++    "src/atomic/*.c",
++    "src/audio/*.c",
++    "src/audio/disk/*.c",
++    "src/audio/dummy/*.c",
++    "src/camera/*.c",
++    "src/camera/dummy/*.c",
++    "src/core/*.c",
++    "src/cpuinfo/*.c",
++    "src/dialog/*.c",
++    "src/dynapi/*.c",
++    "src/events/*.c",
++    "src/filesystem/*.c",
++    "src/gpu/*.c",
++    "src/gpu/vulkan/*.c",
++    "src/haptic/*.c",
++    "src/haptic/hidapi/*.c",
++    "src/hidapi/*.c",
++    "src/io/*.c",
++    "src/io/generic/*.c",
++    "src/joystick/*.c",
++    "src/joystick/hidapi/*.c",
++    "src/joystick/virtual/*.c",
++    "src/libm/*.c",
++    "src/locale/*.c",
++    "src/main/*.c",
++    "src/main/generic/*.c",
++    "src/misc/*.c",
++    "src/power/*.c",
++    "src/process/*.c",
++    "src/render/*.c",
++    "src/render/*/*.c",
++    "src/sensor/*.c",
++    "src/sensor/dummy/*.c",
++    "src/stdlib/*.c",
++    "src/storage/*.c",
++    "src/storage/generic/*.c",
++    "src/storage/steam/*.c",
++    "src/thread/*.c",
++    "src/time/*.c",
++    "src/timer/*.c",
++    "src/tray/*.c",
++    "src/video/*.c",
++    "src/video/dummy/*.c",
++    "src/video/offscreen/*.c",
++    "src/video/yuv2rgb/*.c",
++])
++
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/cmake/sdlchecks.cmake#L616-L641
++_WAYLAND = wayland_protocol_sources(glob(["wayland-protocols/*.xml"]))
++
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/CMakeLists.txt#L1774-L2152
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/cmake/sdlchecks.cmake#L1090-L1101
++_LINUX_SRCS = glob([
++    "src/audio/alsa/*.c",
++    "src/camera/v4l2/*.c",
++    "src/core/unix/*.c",
++    "src/dialog/unix/*.c",
++    "src/filesystem/unix/*.c",
++    "src/haptic/linux/*.c",
++    "src/joystick/linux/*.c",
++    "src/loadso/dlopen/*.c",
++    "src/locale/unix/*.c",
++    "src/misc/unix/*.c",
++    "src/power/linux/*.c",
++    "src/process/posix/*.c",
++    "src/thread/pthread/*.c",
++    "src/time/unix/*.c",
++    "src/timer/unix/*.c",
++    "src/tray/unix/*.c",
++    "src/video/wayland/*.c",
++    "src/video/x11/*.c",
++]) + [
++    # The rest of src/core/linux needs D-Bus or libudev.
++    # https://github.com/libsdl-org/SDL/blob/release-3.4.18/CMakeLists.txt#L2005-L2075
++    "src/core/linux/SDL_evdev.c",
++    "src/core/linux/SDL_evdev_capabilities.c",
++    "src/core/linux/SDL_evdev_kbd.c",
++    "src/core/linux/SDL_threadprio.c",
++    "src/filesystem/posix/SDL_sysfsops.c",
++] + _WAYLAND.srcs + _WAYLAND.hdrs
++
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/CMakeLists.txt#L2508-L2675
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/CMakeLists.txt#L3469-L3471
++_MACOS_SRCS = glob([
++    "src/haptic/darwin/*.c",
++    "src/joystick/darwin/*.c",
++    "src/loadso/dlopen/*.c",
++    "src/power/macos/*.c",
++    "src/process/posix/*.c",
++    "src/thread/pthread/*.c",
++    "src/time/unix/*.c",
++    "src/timer/unix/*.c",
++]) + [
++    "src/filesystem/posix/SDL_sysfsops.c",
++]
++
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/CMakeLists.txt#L2180-L2503
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/CMakeLists.txt#L3480-L3486
++_WINDOWS_SRCS = glob(
++    [
++        "src/audio/directsound/*.c",
++        "src/audio/wasapi/*.c",
++        "src/camera/mediafoundation/*.c",
++        "src/core/windows/*.c",
++        "src/core/windows/*.cpp",
++        "src/dialog/windows/*.c",
++        "src/filesystem/windows/*.c",
++        "src/gpu/d3d12/*.c",
++        "src/haptic/windows/*.c",
++        "src/io/windows/*.c",
++        "src/joystick/gdk/*.cpp",
++        "src/joystick/windows/*.c",
++        "src/loadso/windows/*.c",
++        "src/locale/windows/*.c",
++        "src/main/windows/*.c",
++        "src/misc/windows/*.c",
++        "src/power/windows/*.c",
++        "src/process/windows/*.c",
++        "src/sensor/windows/*.c",
++        "src/thread/windows/*.c",
++        "src/time/windows/*.c",
++        "src/timer/windows/*.c",
++        "src/tray/windows/*.c",
++        "src/video/windows/*.c",
++        "src/video/windows/*.cpp",
++    ],
++) + [
++    # https://github.com/libsdl-org/SDL/blob/release-3.4.18/CMakeLists.txt#L2352-L2366
++    "src/thread/generic/SDL_syscond.c",
++    "src/thread/generic/SDL_sysrwlock.c",
++]
++
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/CMakeLists.txt#L1107-L1112
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/cmake/sdlchecks.cmake#L967-L969
++_LINUX_LINKOPTS = [
++    "-ldl",
++    "-lm",
++    "-pthread",
++]
++
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/CMakeLists.txt#L2405
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/CMakeLists.txt#L2467
++_WINDOWS_LINKOPTS = [lib + ".lib" for lib in [
++    "advapi32",
++    "dinput8",
++    "gdi32",
++    "imm32",
++    "kernel32",
++    "ole32",
++    "oleaut32",
++    "setupapi",
++    "shell32",
++    "user32",
++    "uuid",
++    "version",
++    "winmm",
++]]
++
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/CMakeLists.txt#L2770-L2836
++_MACOS_FRAMEWORKS = [
++    "AudioToolbox",
++    "AVFoundation",
++    "Carbon",
++    "Cocoa",
++    "CoreAudio",
++    "CoreMedia",
++    "CoreVideo",
++    "ForceFeedback",
++    "Foundation",
++    "GameController",
++    "IOKit",
++    "Metal",
++    "QuartzCore",
++]
++
++_MACOS_WEAK_FRAMEWORKS = [
++    "CoreHaptics",
++    "UniformTypeIdentifiers",
++]
++
++_MACOS_LINKOPTS = [
++    flag
++    for framework in _MACOS_FRAMEWORKS
++    for flag in [
++        "-framework",
++        framework,
++    ]
++] + [
++    flag
++    for framework in _MACOS_WEAK_FRAMEWORKS
++    for flag in [
++        "-weak_framework",
++        framework,
++    ]
++]
++
++# The Objective-C sources; objc_wrappers.bzl explains the wrapping.
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/CMakeLists.txt#L2508-L2765
++_OBJC_SRCS = glob([
++    "src/audio/coreaudio/*.m",
++    "src/camera/coremedia/*.m",
++    "src/dialog/cocoa/*.m",
++    "src/filesystem/cocoa/*.m",
++    "src/gpu/metal/*.m",
++    "src/joystick/apple/*.m",
++    "src/locale/macos/*.m",
++    "src/misc/macos/*.m",
++    "src/render/metal/*.m",
++    "src/tray/cocoa/*.m",
++    "src/video/cocoa/*.m",
++])
++
++objc_wrappers(
++    name = "macos_objc_wrappers",
++    srcs = _OBJC_SRCS,
++    target_compatible_with = ["@platforms//os:macos"],
++)
++
++cc_library(
++    name = "sdl3_macos_objc",
++    srcs = [":macos_objc_wrappers"],
++    # ARC as upstream compiles every Apple source with, and requires.
++    # https://github.com/libsdl-org/SDL/blob/release-3.4.18/CMakeLists.txt#L3881-L3886
++    copts = _COPTS + [
++        "-x",
++        "objective-c",
++        "-fobjc-arc",
++    ],
++    features = _FEATURES,
++    # The same defines as the C half: both compile SDL's private headers.
++    local_defines = _LOCAL_DEFINES + _DEBUG_DEFINES + _STEAM_DEFINES,
++    target_compatible_with = ["@platforms//os:macos"],
++    deps = [
++        ":build_config_shipped",
++        ":khronos_headers",
++        ":private_headers",
++    ],
++)
++
++# The Linux libraries SDL loads at runtime by soname, as upstream does.
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/CMakeLists.txt#L234
++cc_headers_only(
++    name = "linux_runtime_loaded_headers",
++    target_compatible_with = _LINUX_ONLY,
++    deps = [
++        "@alsa_lib",
++        "@libx11",
++        "@libxcursor",
++        "@libxext",
++        "@libxfixes",
++        "@libxi",
++        "@libxrandr",
++        "@wayland//:wayland_client",
++        "@wayland//:wayland_cursor",
++        "@wayland//:wayland_egl",
++        "@xkbcommon//:xkbcommon_headers",
++    ],
++)
++
++cc_library(
++    name = "sdl3",
++    srcs = _COMMON_SRCS + select({
++        "@platforms//os:linux": _LINUX_SRCS,
++        "@platforms//os:macos": _MACOS_SRCS,
++        "@platforms//os:windows": _WINDOWS_SRCS,
++        "//conditions:default": [],
++    }),
++    # On this target too, so a consumer depending on @sdl3 alone passes layering_check.
++    hdrs = glob(["include/SDL3/*.h"]),
++    copts = _COPTS,
++    features = _FEATURES,
++    implementation_deps = [
++        ":khronos_headers",
++        ":private_headers",
++    ] + select({
++        "@platforms//os:linux": [
++            ":build_config_linux",
++            ":linux_runtime_loaded_headers",
++        ],
++        "@platforms//os:macos": [
++            ":build_config_shipped",
++            ":sdl3_macos_objc",
++        ],
++        "@platforms//os:windows": [":build_config_shipped"],
++        "//conditions:default": [],
++    }),
++    includes = ["include"],
++    linkopts = select({
++        "@platforms//os:linux": _LINUX_LINKOPTS,
++        "@platforms//os:macos": _MACOS_LINKOPTS,
++        "@platforms//os:windows": _WINDOWS_LINKOPTS,
++        "//conditions:default": [],
++    }),
++    local_defines = _LOCAL_DEFINES + _DEBUG_DEFINES + _LARGE_FILE_DEFINES + select({
++        # _REENTRANT as upstream's pthread check adds it. USING_GENERATED_CONFIG_H
++        # makes SDL's shipped dispatch header #error if it were ever picked up
++        # instead of the generated one.
++        # https://github.com/libsdl-org/SDL/blob/release-3.4.18/cmake/sdlchecks.cmake#L967-L969
++        # https://github.com/libsdl-org/SDL/blob/release-3.4.18/CMakeLists.txt#L547
++        "@platforms//os:linux": [
++            "_REENTRANT",
++            "USING_GENERATED_CONFIG_H",
++        ],
++        "@platforms//os:macos": _STEAM_DEFINES,
++        "@platforms//os:windows": _STEAM_DEFINES,
++        "//conditions:default": [],
++    }),
++    target_compatible_with = _SUPPORTED_OS,
++    visibility = ["//visibility:public"],
++)
++
++# SDL3_test, the helper library SDL's own tests link.
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/CMakeLists.txt#L495-L500
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/CMakeLists.txt#L4091-L4093
++cc_library(
++    name = "sdl3_test",
++    srcs = glob(["src/test/*.c"]),
++    copts = _COPTS,
++    implementation_deps = [":private_headers"],
++    local_defines = _DEBUG_DEFINES,
++    visibility = ["//visibility:public"],
++    deps = [":sdl3"],
++)
++
++# What SDL's own tests read from inside the tree: the private headers, by
++# relative path, and the build config, by bare name.
++cc_library(
++    name = "test_internals",
++    testonly = True,
++    visibility = ["//test:__pkg__"],
++    deps = [":private_headers"] + select({
++        "@platforms//os:linux": [":build_config_linux"],
++        "//conditions:default": [":build_config_shipped"],
++    }),
++)
+diff --git a/MODULE.bazel b/MODULE.bazel
+new file mode 100644
+--- /dev/null
++++ b/MODULE.bazel
+@@ -0,0 +1,29 @@
++"""https://github.com/libsdl-org/SDL"""
++
++module(
++    name = "sdl3",
++    version = "3.4.20",
++    bazel_compatibility = [">=7.4.0"],
++    compatibility_level = 1,
++)
++
++bazel_dep(name = "platforms", version = "1.0.0")
++bazel_dep(name = "rules_cc", version = "0.2.16")
++
++# Linux: the build config is generated from feature probes.
++bazel_dep(name = "rules_cc_autoconf", version = "0.35.0")
++
++# Linux: headers only. SDL loads these libraries at runtime by soname.
++bazel_dep(name = "alsa_lib", version = "1.2.9.bcr.4")
++bazel_dep(name = "libx11", version = "1.8.12.bcr.5")
++bazel_dep(name = "libxcursor", version = "1.2.3")
++bazel_dep(name = "libxext", version = "1.3.6")
++bazel_dep(name = "libxfixes", version = "6.0.2")
++bazel_dep(name = "libxi", version = "1.8.2")
++bazel_dep(name = "libxrandr", version = "1.5.4")
++bazel_dep(name = "wayland", version = "1.24.0.bcr.1")
++bazel_dep(name = "xkbcommon", version = "1.9.2.bcr.beta.2")
++
++# wayland asks for libffi 3.4.7.bcr.3, which does not build on Linux aarch64;
++# 3.4.7.bcr.4 gives macOS aarch64 its own settings and fixes it.
++bazel_dep(name = "libffi", version = "3.4.7.bcr.4")
+diff --git a/cc_headers_only.bzl b/cc_headers_only.bzl
+new file mode 100644
+--- /dev/null
++++ b/cc_headers_only.bzl
+@@ -0,0 +1,43 @@
++"""This file gives a rule that forwards headers without their libraries."""
++
++load("@rules_cc//cc/common:cc_common.bzl", "cc_common")
++load("@rules_cc//cc/common:cc_info.bzl", "CcInfo")
++
++visibility("private")
++
++def _cc_headers_only_impl(ctx):
++    merged = cc_common.merge_compilation_contexts(
++        compilation_contexts = [dep[CcInfo].compilation_context for dep in ctx.attr.deps],
++    )
++    return [
++        # The headers themselves, so building this target generates them.
++        DefaultInfo(files = merged.headers),
++        CcInfo(compilation_context = cc_common.create_compilation_context(
++            framework_includes = merged.framework_includes,
++            headers = merged.headers,
++            includes = merged.includes,
++            quote_includes = merged.quote_includes,
++            system_includes = merged.system_includes,
++        )),
++    ]
++
++cc_headers_only = rule(
++    implementation = _cc_headers_only_impl,
++    attrs = {
++        "deps": attr.label_list(
++            providers = [CcInfo],
++            doc = "Libraries whose headers and include paths are forwarded.",
++        ),
++    },
++    doc = """\
++This rule gives the headers and include paths of `deps`, and nothing to link.
++
++A cc_library dependency puts the archives of that dependency on every
++downstream link line. SDL loads these libraries at runtime by soname, and
++compiles only against their headers.
++
++This rule also drops the defines of `deps`. Those defines belong to the builds
++of those libraries. If a dependency starts to export a `HAVE_*` name, that name
++changes the features that SDL compiles, and gives no warning.
++""",
++)
+diff --git a/objc_wrappers.bzl b/objc_wrappers.bzl
+new file mode 100644
+--- /dev/null
++++ b/objc_wrappers.bzl
+@@ -0,0 +1,38 @@
++"""This file gives a rule that wraps Objective-C sources for cc_library."""
++
++visibility("private")
++
++def _src_path(src):
++    """Returns the path of the source from the repository root."""
++    label = src.owner
++    return label.package + "/" + label.name if label.package else label.name
++
++def _objc_wrappers_impl(ctx):
++    outputs = []
++    for src in ctx.files.srcs:
++        path = _src_path(src)
++        wrapper = ctx.actions.declare_file(ctx.attr.prefix + "/" + path + ".c")
++        ctx.actions.write(wrapper, "#include \"%s\"\n" % path)
++        outputs.append(wrapper)
++    return [DefaultInfo(files = depset(outputs))]
++
++objc_wrappers = rule(
++    implementation = _objc_wrappers_impl,
++    attrs = {
++        "prefix": attr.string(
++            default = "objc",
++            doc = "Directory the generated files go in.",
++        ),
++        "srcs": attr.label_list(
++            allow_files = [".m"],
++            doc = "Objective-C sources to wrap.",
++        ),
++    },
++    doc = """\
++This rule writes one C file for each source. Each C file includes its source
++by the path from the repository root. A cc_library compiles those C files with
++`-x objective-c`, so any C toolchain that targets macOS can build them.
++objc_library accepts `.m` files directly, but works only with apple_support's
++toolchain. `__FILE__` and the debug line table still name the `.m` file.
++""",
++)
+diff --git a/sdl3_config_checks.bzl b/sdl3_config_checks.bzl
+new file mode 100644
+--- /dev/null
++++ b/sdl3_config_checks.bzl
+@@ -0,0 +1,609 @@
++"""Feature checks for SDL's Linux build configuration header.
++
++SDL supplies hand-written headers for Windows and Apple platforms, and
++generates the Linux header with CMake. These checks do the same work with
++rules_cc_autoconf, against the toolchain and the sysroot that Bazel uses.
++Each group links to the CMake lines that it copies.
++
++The file has two kinds of entry:
++
++  * checks, wherever CMake examines the system. CMake's check_symbol_exists
++    and check_c_source_compiles build and link an executable, and these
++    checks do the same;
++  * fixed AC_DEFINEs, where CMake's answer follows from a build option or
++    from a dependency in MODULE.bazel. The checks cannot see the X11,
++    Wayland, xkbcommon and ALSA modules, so this file sets those values.
++    Where a macro decides which symbols SDL demands at runtime, use the
++    oldest library version that SDL supports, not the minimum version in
++    MODULE.bazel.
++
++A template entry with no check becomes `/* #undef NAME */`, and autoconf_hdr
++drops a check that has no template entry. Neither case gives a warning.
++
++To compare the generated header with SDL's own configure step, use a Linux
++machine that has the X11, Wayland, xkbcommon, ALSA, GL and EGL development
++packages:
++
++    cmake -S SDL3-<version> -B build -DCMAKE_BUILD_TYPE=Release \
++      -DSDL_SHARED=OFF -DSDL_STATIC=ON -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF \
++      -DSDL_TEST_LIBRARY=OFF -DSDL_INSTALL=OFF \
++      -DSDL_ALSA=ON -DSDL_PULSEAUDIO=OFF -DSDL_PIPEWIRE=OFF -DSDL_JACK=OFF \
++      -DSDL_SNDIO=OFF -DSDL_OSS=OFF -DSDL_X11=ON -DSDL_X11_XSCRNSAVER=OFF \
++      -DSDL_X11_XTEST=OFF -DSDL_FRIBIDI=OFF -DSDL_LIBTHAI=OFF -DSDL_WAYLAND=ON \
++      -DSDL_WAYLAND_LIBDECOR=OFF -DSDL_KMSDRM=OFF -DSDL_OPENVR=OFF -DSDL_RPI=OFF \
++      -DSDL_ROCKCHIP=OFF -DSDL_VIVANTE=OFF -DSDL_OPENGL=ON -DSDL_OPENGLES=ON \
++      -DSDL_VULKAN=ON -DSDL_DBUS=OFF -DSDL_IBUS=OFF -DSDL_LIBUDEV=OFF \
++      -DSDL_LIBURING=OFF -DSDL_HIDAPI_LIBUSB=OFF
++    diff <(grep '^#define' build/include-config-release/build_config/SDL_build_config.h | sort) \
++         <(grep '^#define' "$(bazel cquery --output=files @sdl3//:config_h)" | sort)
++
++Three differences are expected. CMake finds Mesa's `GL/glx.h` and sets
++`SDL_VIDEO_OPENGL_GLX`; this module has no GLX. CMake sets the
++`SDL_DISABLE_<intrinsics>` lines for the CPU of the machine that runs it;
++this module leaves them to `SDL_intrin.h`. CMake reads the packages on the
++machine for the xkbcommon and libdecor version macros; this file sets a
++minimum runtime version.
++"""
++
++load("@rules_cc_autoconf//autoconf:checks.bzl", "checks")
++
++# What CMake puts in front of every probe on Linux: _GNU_SOURCE for the
++# whole libc, _REENTRANT from the pthread check.
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/CMakeLists.txt#L124
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/cmake/sdlchecks.cmake#L967-L969
++_PROBE_COPTS = [
++    "-D_GNU_SOURCE=1",
++    "-D_REENTRANT",
++]
++
++def _define_name(prefix, text):
++    # float.h -> HAVE_FLOAT_H, sys/types.h -> HAVE_SYS_TYPES_H, _Exit -> HAVE__EXIT:
++    # the spelling CMake's string(TOUPPER) plus [./] -> _ produces.
++    return prefix + text.upper().replace(".", "_").replace("/", "_")
++
++def _header(header):
++    return checks.AC_CHECK_HEADER(
++        header,
++        copts = _PROBE_COPTS,
++        define = _define_name("HAVE_", header),
++    )
++
++def _includes(headers):
++    # `includes` takes preprocessor lines, not header names.
++    return ["#include <%s>" % header for header in headers]
++
++def _builds(define, code, copts = [], linkopts = [], requires = None):
++    # Defines `define` only on success: SDL reads these with #ifdef, so a
++    # `#define HAVE_X 0` on failure would count as present.
++    return checks.AC_TRY_LINK(
++        code = code,
++        copts = _PROBE_COPTS + copts,
++        define = define,
++        if_false = None,
++        linkopts = linkopts,
++        requires = requires,
++    )
++
++def _decl(symbol, headers):
++    # CMake's check_symbol_exists: a macro passes, a function has to link.
++    # CMake links libm into these probes.
++    # https://github.com/libsdl-org/SDL/blob/release-3.4.18/CMakeLists.txt#L1107-L1119
++    return _builds(
++        _define_name("HAVE_", symbol),
++        "\n".join(_includes(headers)) + """
++int main(void) {
++#ifndef %s
++    (void)%s;
++#endif
++    return 0;
++}
++""" % (symbol, symbol),
++        linkopts = ["-lm"],
++    )
++
++# =============================================================================
++# C library
++# =============================================================================
++
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/CMakeLists.txt#L1046-L1076
++_LIBC_HEADERS = [
++    "float.h",
++    "iconv.h",
++    "inttypes.h",
++    "limits.h",
++    "malloc.h",
++    "math.h",
++    "memory.h",
++    "signal.h",
++    "stdarg.h",
++    "stdbool.h",
++    "stddef.h",
++    "stdint.h",
++    "stdio.h",
++    "stdlib.h",
++    "string.h",
++    "strings.h",
++    "sys/types.h",
++    "time.h",
++    "wchar.h",
++]
++
++# CMake probes each symbol against every header found above; here each one is
++# probed with the header that declares it. The MSVC names are upstream's list.
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/CMakeLists.txt#L1078-L1119
++_LIBC_SYMBOLS = {
++    "math.h": [
++        "acos",
++        "acosf",
++        "asin",
++        "asinf",
++        "atan",
++        "atan2",
++        "atan2f",
++        "atanf",
++        "ceil",
++        "ceilf",
++        "copysign",
++        "copysignf",
++        "cos",
++        "cosf",
++        "exp",
++        "expf",
++        "fabs",
++        "fabsf",
++        "floor",
++        "floorf",
++        "fmod",
++        "fmodf",
++        "log",
++        "log10",
++        "log10f",
++        "logf",
++        "lround",
++        "lroundf",
++        "modf",
++        "modff",
++        "pow",
++        "powf",
++        "round",
++        "roundf",
++        "scalbn",
++        "scalbnf",
++        "sin",
++        "sinf",
++        "sqr",
++        "sqrt",
++        "sqrtf",
++        "tan",
++        "tanf",
++        "trunc",
++        "truncf",
++    ],
++    "stdio.h": [
++        "fopen64",
++        "fseeko",
++        "fseeko64",
++        "sscanf",
++        "vsnprintf",
++        "vsscanf",
++    ],
++    "stdlib.h": [
++        "_Exit",
++        "_i64toa",
++        "_ltoa",
++        "abs",
++        "atof",
++        "atoi",
++        "getenv",
++        "itoa",
++        "malloc",
++        "putenv",
++        "setenv",
++        "strtod",
++        "strtol",
++        "strtoll",
++        "strtoul",
++        "strtoull",
++        "unsetenv",
++    ],
++    "string.h": [
++        "memcmp",
++        "memcpy",
++        "memmove",
++        "memset",
++        "strcasestr",
++        "strchr",
++        "strcmp",
++        "strlcat",
++        "strlcpy",
++        "strlen",
++        "strncmp",
++        "strnlen",
++        "strnstr",
++        "strpbrk",
++        "strrchr",
++        "strstr",
++        "strtok_r",
++    ],
++    "strings.h": [
++        "bcopy",
++        "index",
++        "rindex",
++    ],
++    "wchar.h": [
++        "wcscmp",
++        "wcsdup",
++        "wcslcat",
++        "wcslcpy",
++        "wcslen",
++        "wcsncmp",
++        "wcsnlen",
++        "wcsstr",
++        "wcstol",
++    ],
++}
++
++# isinf/isnan: whether the double and float forms compile with float
++# conversions as errors, and whether the f-suffixed functions exist.
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/CMakeLists.txt#L1121-L1158
++_FLOAT_CLASS_COPTS = [
++    "-Wfloat-conversion",
++    "-Werror",
++]
++
++def _float_class_checks(fn):
++    upper = fn.upper()
++    return [
++        _builds(
++            "HAVE_" + upper,
++            "#include <math.h>\nint main(void) { double d = 3.14159; return %s(d); }\n" % fn,
++            copts = _FLOAT_CLASS_COPTS,
++        ),
++        _builds(
++            "HAVE_%s_FLOAT_MACRO" % upper,
++            "#include <math.h>\nint main(void) { float f = 3.14159f; return %s(f); }\n" % fn,
++            copts = _FLOAT_CLASS_COPTS,
++        ),
++        _builds(
++            "HAVE_%sF" % upper,
++            "#include <math.h>\nint main(void) { float f = 3.14159f; return %sf(f); }\n" % fn,
++            copts = _FLOAT_CLASS_COPTS,
++        ),
++    ]
++
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/CMakeLists.txt#L1160-L1182
++_UNIX_SYMBOLS = [
++    ("fdatasync", ["unistd.h"]),
++    ("gethostname", ["unistd.h"]),
++    ("getpagesize", ["unistd.h"]),
++    ("getresgid", ["unistd.h"]),
++    ("getresuid", ["unistd.h"]),
++    ("sigaction", ["signal.h"]),
++    ("sigtimedwait", ["signal.h"]),
++    ("setjmp", ["setjmp.h"]),
++    ("nanosleep", ["time.h"]),
++    ("gmtime_r", ["time.h"]),
++    ("localtime_r", ["time.h"]),
++    ("nl_langinfo", ["langinfo.h"]),
++    ("sysconf", ["unistd.h"]),
++    ("sysctlbyname", ["sys/types.h", "sys/sysctl.h"]),
++    ("getauxval", ["sys/auxv.h"]),
++    ("elf_aux_info", ["sys/auxv.h"]),
++    ("ppoll", ["poll.h"]),
++    ("memfd_create", ["sys/mman.h"]),
++    ("posix_fallocate", ["fcntl.h"]),
++    ("posix_spawn_file_actions_addchdir", ["spawn.h"]),
++    ("posix_spawn_file_actions_addchdir_np", ["spawn.h"]),
++]
++
++SDL3_CONFIG_CHECKS_LIBC = [
++    # https://github.com/libsdl-org/SDL/blob/release-3.4.18/CMakeLists.txt#L1043-L1045
++    checks.AC_DEFINE("HAVE_LIBC", "1"),
++] + [
++    _header(header)
++    for header in _LIBC_HEADERS
++] + [
++    _decl(symbol, [header])
++    for header, symbols in _LIBC_SYMBOLS.items()
++    for symbol in symbols
++] + _float_class_checks("isinf") + _float_class_checks("isnan") + [
++    _decl(symbol, headers)
++    for symbol, headers in _UNIX_SYMBOLS
++] + [
++    # iconv from the C library; libiconv is not probed.
++    # https://github.com/libsdl-org/SDL/blob/release-3.4.18/CMakeLists.txt#L1183-L1210
++    checks.AC_TRY_LINK(
++        code = "#define LIBICONV_PLUG 1\n#include <stddef.h>\n#include <iconv.h>\nint main(void) { return !iconv_open(NULL, NULL); }\n",
++        copts = _PROBE_COPTS,
++        define = "HAVE_ICONV",
++    ),
++    # https://github.com/libsdl-org/SDL/blob/release-3.4.18/CMakeLists.txt#L1212-L1213
++    checks.AC_CHECK_MEMBER(
++        "struct sigaction.sa_sigaction",
++        copts = _PROBE_COPTS,
++        define = "HAVE_SA_SIGACTION",
++        includes = _includes(["signal.h"]),
++    ),
++    checks.AC_CHECK_MEMBER(
++        "struct stat.st_mtim",
++        copts = _PROBE_COPTS,
++        define = "HAVE_ST_MTIM",
++        includes = _includes(["sys/stat.h"]),
++    ),
++    # SDL_DISABLE_ALLOCA is MSVC-only, so it is never set here.
++    # https://github.com/libsdl-org/SDL/blob/release-3.4.18/CMakeLists.txt#L1025-L1040
++    _header("alloca.h"),
++]
++
++# =============================================================================
++# Compiler
++# =============================================================================
++
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/CMakeLists.txt#L618-L640
++SDL3_CONFIG_CHECKS_COMPILER = [
++    _builds(
++        "HAVE_GCC_ATOMICS",
++        """int main(int argc, char **argv) {
++    int a;
++    void *x, *y, *z;
++    __sync_lock_test_and_set(&a, 4);
++    __sync_lock_test_and_set(&x, y);
++    __sync_fetch_and_add(&a, 1);
++    __sync_bool_compare_and_swap(&a, 5, 10);
++    __sync_bool_compare_and_swap(&x, y, z);
++    return 0; }
++""",
++    ),
++    _builds(
++        "HAVE_GCC_SYNC_LOCK_TEST_AND_SET",
++        """int main(int argc, char **argv) {
++    int a;
++    __sync_lock_test_and_set(&a, 1);
++    __sync_lock_release(&a);
++    return 0; }
++""",
++        requires = ["!HAVE_GCC_ATOMICS"],
++    ),
++]
++
++# =============================================================================
++# Linux
++# =============================================================================
++
++# CMake adds -D_REENTRANT -pthread to every probe here.
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/cmake/sdlchecks.cmake#L967-L969
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/cmake/sdlchecks.cmake#L1020-L1088
++_PTHREAD = {
++    "copts": ["-pthread"],
++    "linkopts": ["-pthread"],
++}
++
++_PTHREAD_CHECKS = [
++    _builds(
++        "HAVE_PTHREADS",
++        "#include <pthread.h>\nint main(void) { pthread_attr_t type; pthread_attr_init(&type); return 0; }\n",
++        **_PTHREAD
++    ),
++    checks.AC_DEFINE("SDL_THREAD_PTHREAD", "1", requires = ["HAVE_PTHREADS"]),
++    _builds(
++        "SDL_THREAD_PTHREAD_RECURSIVE_MUTEX",
++        "#include <pthread.h>\nint main(void) { pthread_mutexattr_t attr; pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE); return 0; }\n",
++        requires = ["HAVE_PTHREADS"],
++        **_PTHREAD
++    ),
++    _builds(
++        "SDL_THREAD_PTHREAD_RECURSIVE_MUTEX_NP",
++        "#include <pthread.h>\nint main(void) { pthread_mutexattr_t attr; pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE_NP); return 0; }\n",
++        requires = [
++            "HAVE_PTHREADS",
++            "!SDL_THREAD_PTHREAD_RECURSIVE_MUTEX",
++        ],
++        **_PTHREAD
++    ),
++    _builds(
++        "HAVE_PTHREADS_SEM",
++        "#include <pthread.h>\n#include <semaphore.h>\nint main(void) { return 0; }\n",
++        requires = ["HAVE_PTHREADS"],
++        **_PTHREAD
++    ),
++    _builds(
++        "HAVE_SEM_TIMEDWAIT",
++        "#include <pthread.h>\n#include <semaphore.h>\nint main(void) { sem_timedwait(NULL, NULL); return 0; }\n",
++        requires = ["HAVE_PTHREADS_SEM"],
++        **_PTHREAD
++    ),
++    _header("pthread.h"),
++    _header("pthread_np.h"),
++    _builds(
++        "HAVE_PTHREAD_SETNAME_NP",
++        """#include <pthread.h>
++int main(void) {
++#ifdef __APPLE__
++    pthread_setname_np("");
++#else
++    pthread_setname_np(pthread_self(), "");
++#endif
++    return 0; }
++""",
++        requires = ["HAVE_PTHREAD_H"],
++        **_PTHREAD
++    ),
++    checks.AC_CHECK_DECL(
++        "pthread_set_name_np",
++        copts = _PROBE_COPTS,
++        define = "HAVE_PTHREAD_SET_NAME_NP",
++        includes = _includes([
++            "pthread.h",
++            "pthread_np.h",
++        ]),
++        requires = ["HAVE_PTHREAD_NP_H"],
++    ),
++]
++
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/CMakeLists.txt#L1865-L1956
++_LINUX_INPUT_CHECKS = [
++    _builds(
++        "HAVE_LINUX_INPUT_H",
++        "#include <linux/input.h>\n#ifndef EVIOCGNAME\n#error EVIOCGNAME() ioctl not available\n#endif\nint main(void) { return 0; }\n",
++    ),
++    _builds(
++        "HAVE_INPUT_KD",
++        """#include <linux/kd.h>
++#include <linux/keyboard.h>
++#include <sys/ioctl.h>
++int main(void) {
++    struct kbentry kbe;
++    kbe.kb_table = KG_CTRL;
++    ioctl(0, KDGKBENT, &kbe);
++    return 0; }
++""",
++    ),
++    _builds(
++        "HAVE_LINUX_VIDEODEV2_H",
++        "#include <linux/videodev2.h>\nint main(void) { return 0; }\n",
++    ),
++    checks.AC_DEFINE("SDL_INPUT_LINUXEV", "1", requires = ["HAVE_LINUX_INPUT_H"]),
++    checks.AC_DEFINE("SDL_INPUT_LINUXKD", "1", requires = ["HAVE_INPUT_KD"]),
++    checks.AC_DEFINE("SDL_HAPTIC_LINUX", "1", requires = ["HAVE_LINUX_INPUT_H"]),
++    checks.AC_DEFINE("SDL_JOYSTICK_LINUX", "1", requires = ["HAVE_LINUX_INPUT_H"]),
++    checks.AC_DEFINE("SDL_CAMERA_DRIVER_V4L2", "1", requires = ["HAVE_LINUX_VIDEODEV2_H"]),
++    _header("sys/inotify.h"),
++    _decl("inotify_init", ["sys/inotify.h"]),
++    _decl("inotify_init1", ["sys/inotify.h"]),
++    checks.AC_DEFINE("HAVE_INOTIFY", "1", requires = [
++        "HAVE_SYS_INOTIFY_H",
++        "HAVE_INOTIFY_INIT",
++    ]),
++]
++
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/cmake/sdlchecks.cmake#L52-L72
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/CMakeLists.txt#L1375-L1391
++_UNIX_CHECKS = [
++    _decl("dlopen", ["dlfcn.h"]),
++    checks.AC_DEFINE("SDL_LOADSO_DLOPEN", "1", requires = ["HAVE_DLOPEN"]),
++    checks.AC_DEFINE("DYNAPI_NEEDS_DLOPEN", "1"),
++    _builds(
++        "HAVE_O_CLOEXEC",
++        "#include <fcntl.h>\nint flag = O_CLOEXEC;\nint main(void) { return 0; }\n",
++    ),
++    # https://github.com/libsdl-org/SDL/blob/release-3.4.18/CMakeLists.txt#L2100-L2111
++    checks.AC_CHECK_FUNC("clock_gettime", copts = _PROBE_COPTS, define = "HAVE_CLOCK_GETTIME"),
++    # https://github.com/libsdl-org/SDL/blob/release-3.4.18/CMakeLists.txt#L3487-L3534
++    checks.AC_TRY_LINK(
++        code = """#include <spawn.h>
++#include <unistd.h>
++int main(void) {
++    int pipes[2];
++    int pid;
++    const char *args[] = { "/bin/false", NULL };
++    const char *env[] = { NULL };
++    pipe(pipes);
++    posix_spawnattr_t attr;
++    posix_spawn_file_actions_t fa;
++    posix_spawnattr_init(&attr);
++    posix_spawn_file_actions_init(&fa);
++    posix_spawn_file_actions_addclose(&fa, pipes[0]);
++    posix_spawn_file_actions_adddup2(&fa, pipes[1], STDOUT_FILENO);
++    posix_spawn(&pid, args[0], &fa, &attr, (char *const *)args, (char *const *)env);
++    posix_spawnp(&pid, args[0], &fa, &attr, (char *const *)args, (char *const *)env);
++    posix_spawn_file_actions_destroy(&fa);
++    posix_spawnattr_destroy(&attr);
++    return 0; }
++""",
++        copts = _PROBE_COPTS,
++        define = "HAVE_POSIX_SPAWN",
++    ),
++    _decl("vfork", ["unistd.h"]),
++    checks.AC_DEFINE("SDL_PROCESS_POSIX", "1", requires = [
++        "HAVE_POSIX_SPAWN",
++        "HAVE_VFORK",
++    ]),
++]
++
++# Subsystems whose CMake answer on Linux follows from the build options this
++# module fixes (the Bazel equivalents of the -DSDL_*=ON/OFF choices).
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/CMakeLists.txt#L1774-L2152
++_LINUX_FIXED = [
++    # Audio: ALSA loaded at runtime; PulseAudio, PipeWire, JACK, sndio, OSS off.
++    # https://github.com/libsdl-org/SDL/blob/release-3.4.18/cmake/sdlchecks.cmake#L100-L135
++    checks.AC_DEFINE("SDL_AUDIO_DRIVER_ALSA", "1"),
++    checks.AC_DEFINE("SDL_AUDIO_DRIVER_ALSA_DYNAMIC", '"libasound.so.2"'),
++    checks.AC_DEFINE("SDL_AUDIO_DRIVER_DISK", "1"),
++    checks.AC_DEFINE("SDL_AUDIO_DRIVER_DUMMY", "1"),
++    # Joysticks: HIDAPI without a backend (hidraw needs libudev, libusb is
++    # off); CMake ties the virtual joystick to SDL_HIDAPI.
++    # https://github.com/libsdl-org/SDL/blob/release-3.4.18/cmake/sdlchecks.cmake#L1248-L1307
++    checks.AC_DEFINE("SDL_JOYSTICK_HIDAPI", "1"),
++    checks.AC_DEFINE("SDL_JOYSTICK_VIRTUAL", "1"),
++    checks.AC_DEFINE("SDL_SENSOR_DUMMY", "1"),
++    checks.AC_DEFINE("SDL_POWER_LINUX", "1"),
++    checks.AC_DEFINE("SDL_FILESYSTEM_UNIX", "1"),
++    checks.AC_DEFINE("SDL_STORAGE_STEAM", "1"),
++    checks.AC_DEFINE("SDL_FSOPS_POSIX", "1"),
++    checks.AC_DEFINE("SDL_TIME_UNIX", "1"),
++    checks.AC_DEFINE("SDL_TIMER_UNIX", "1"),
++    checks.AC_DEFINE("SDL_CAMERA_DRIVER_DUMMY", "1"),
++    checks.AC_DEFINE("SDL_VIDEO_DRIVER_DUMMY", "1"),
++    checks.AC_DEFINE("SDL_VIDEO_DRIVER_OFFSCREEN", "1"),
++    # OpenGL over EGL (no GLX: GL/glx.h is Mesa's, not a Bazel module),
++    # GLES2 and Vulkan from the headers SDL vendors in src/video/khronos.
++    # https://github.com/libsdl-org/SDL/blob/release-3.4.18/cmake/sdlchecks.cmake#L861-L937
++    checks.AC_DEFINE("SDL_VIDEO_OPENGL", "1"),
++    checks.AC_DEFINE("SDL_VIDEO_OPENGL_EGL", "1"),
++    checks.AC_DEFINE("SDL_VIDEO_OPENGL_ES2", "1"),
++    checks.AC_DEFINE("SDL_VIDEO_RENDER_OGL", "1"),
++    checks.AC_DEFINE("SDL_VIDEO_RENDER_OGL_ES2", "1"),
++    checks.AC_DEFINE("SDL_VIDEO_VULKAN", "1"),
++    checks.AC_DEFINE("SDL_VIDEO_RENDER_VULKAN", "1"),
++    checks.AC_DEFINE("SDL_GPU_VULKAN", "1"),
++    checks.AC_DEFINE("SDL_VIDEO_RENDER_GPU", "1"),
++]
++
++# X11, loaded at runtime by soname; the headers are the modules in
++# MODULE.bazel. Each extension macro makes SDL load that extension's symbols
++# from the system library. The newest are from libXi 1.7 (2013), and a missing
++# one turns off that extension only, not the X11 driver. Xscrnsaver and XTest
++# have no Bazel module.
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/cmake/sdlchecks.cmake#L273-L564
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/src/video/x11/SDL_x11sym.h#L177-L184
++_X11_FIXED = [
++    checks.AC_DEFINE("SDL_VIDEO_DRIVER_X11", "1"),
++    checks.AC_DEFINE("SDL_VIDEO_DRIVER_X11_DYNAMIC", '"libX11.so.6"'),
++    checks.AC_DEFINE("SDL_VIDEO_DRIVER_X11_DYNAMIC_XCURSOR", '"libXcursor.so.1"'),
++    checks.AC_DEFINE("SDL_VIDEO_DRIVER_X11_DYNAMIC_XEXT", '"libXext.so.6"'),
++    checks.AC_DEFINE("SDL_VIDEO_DRIVER_X11_DYNAMIC_XFIXES", '"libXfixes.so.3"'),
++    checks.AC_DEFINE("SDL_VIDEO_DRIVER_X11_DYNAMIC_XINPUT2", '"libXi.so.6"'),
++    checks.AC_DEFINE("SDL_VIDEO_DRIVER_X11_DYNAMIC_XRANDR", '"libXrandr.so.2"'),
++    checks.AC_DEFINE("SDL_VIDEO_DRIVER_X11_HAS_XKBLIB", "1"),
++    checks.AC_DEFINE("SDL_VIDEO_DRIVER_X11_SUPPORTS_GENERIC_EVENTS", "1"),
++    checks.AC_DEFINE("SDL_VIDEO_DRIVER_X11_XCURSOR", "1"),
++    checks.AC_DEFINE("SDL_VIDEO_DRIVER_X11_XDBE", "1"),
++    checks.AC_DEFINE("SDL_VIDEO_DRIVER_X11_XFIXES", "1"),
++    checks.AC_DEFINE("SDL_VIDEO_DRIVER_X11_XINPUT2", "1"),
++    checks.AC_DEFINE("SDL_VIDEO_DRIVER_X11_XINPUT2_SUPPORTS_GESTURE", "1"),
++    checks.AC_DEFINE("SDL_VIDEO_DRIVER_X11_XINPUT2_SUPPORTS_MULTITOUCH", "1"),
++    checks.AC_DEFINE("SDL_VIDEO_DRIVER_X11_XINPUT2_SUPPORTS_SCROLLINFO", "1"),
++    checks.AC_DEFINE("SDL_VIDEO_DRIVER_X11_XRANDR", "1"),
++    checks.AC_DEFINE("SDL_VIDEO_DRIVER_X11_XSHAPE", "1"),
++    checks.AC_DEFINE("SDL_VIDEO_DRIVER_X11_XSYNC", "1"),
++]
++
++# Wayland, loaded at runtime by soname; the protocol code is generated from
++# the XML files SDL ships. No libdecor (no Bazel module).
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/cmake/sdlchecks.cmake#L643-L763
++_WAYLAND_FIXED = [
++    checks.AC_DEFINE("SDL_VIDEO_DRIVER_WAYLAND", "1"),
++    checks.AC_DEFINE("SDL_VIDEO_DRIVER_WAYLAND_DYNAMIC", '"libwayland-client.so.0"'),
++    checks.AC_DEFINE("SDL_VIDEO_DRIVER_WAYLAND_DYNAMIC_CURSOR", '"libwayland-cursor.so.0"'),
++    checks.AC_DEFINE("SDL_VIDEO_DRIVER_WAYLAND_DYNAMIC_EGL", '"libwayland-egl.so.1"'),
++    checks.AC_DEFINE("SDL_VIDEO_DRIVER_WAYLAND_DYNAMIC_XKBCOMMON", '"libxkbcommon.so.0"'),
++]
++
++SDL3_CONFIG_CHECKS_LINUX = (
++    _PTHREAD_CHECKS +
++    _LINUX_INPUT_CHECKS +
++    _UNIX_CHECKS +
++    _LINUX_FIXED +
++    _X11_FIXED +
++    _WAYLAND_FIXED
++)
+diff --git a/test/BUILD.bazel b/test/BUILD.bazel
+new file mode 100644
+--- /dev/null
++++ b/test/BUILD.bazel
+@@ -0,0 +1,237 @@
++load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
++
++# SDL's non-interactive test programs, run the way SDL's ctest runs them:
++# headless on the dummy video and audio drivers, with assertions fatal.
++# Every program test/CMakeLists.txt marks NONINTERACTIVE is here; the one
++# left out is pretest, which upstream builds for 32-bit Windows only.
++# SDL_TESTS_QUICK=1 as SDL's CI sets it for the whole ctest run.
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/test/CMakeLists.txt#L497-L505
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/.github/workflows/generic.yml#L245-L246
++_ENV = {
++    "SDL_ASSERT": "abort",
++    "SDL_AUDIO_DRIVER": "dummy",
++    "SDL_TESTS_QUICK": "1",
++    "SDL_VIDEO_DRIVER": "dummy",
++}
++
++# ctest runs testautomation and testplatform a second time with every CPU
++# feature masked off.
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/test/CMakeLists.txt#L681-L688
++_ENV_NO_SIMD = dict(
++    _ENV,
++    SDL_CPU_FEATURE_MASK = "-all",
++)
++
++# Without HAVE_BUILD_CONFIG testevdev passes without testing anything.
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/test/CMakeLists.txt#L144
++_DEFINES = ["HAVE_BUILD_CONFIG"]
++
++_DEPS = [
++    "@sdl3",
++    "@sdl3//:sdl3_test",
++    "@sdl3//:test_internals",
++]
++
++# SDL's tests include SDL's private headers by relative path, so
++# layering_check cannot work for them.
++_FEATURES = ["-layering_check"]
++
++# testver is C90 upstream.
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/test/CMakeLists.txt#L430
++_C90 = select({
++    "@rules_cc//cc/compiler:clang": ["-std=c90"],
++    "@rules_cc//cc/compiler:gcc": ["-std=c90"],
++    "//conditions:default": [],
++})
++
++# main() comes from testautomation.c through SDL_main.h, hence alwayslink;
++# the library lets the two runs below share the objects.
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/test/CMakeLists.txt#L324-L325
++cc_library(
++    name = "testautomation_lib",
++    testonly = True,
++    srcs = glob([
++        "testautomation*.c",
++        "testautomation*.h",
++    ]),
++    features = _FEATURES,
++    local_defines = _DEFINES,
++    deps = _DEPS,
++    alwayslink = True,
++)
++
++# ctest runs these two serially for temporary files in the working directory;
++# under Bazel each test has its own TEST_TMPDIR and runfiles tree.
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/test/CMakeLists.txt#L687-L688
++cc_test(
++    name = "testautomation",
++    size = "medium",
++    env = _ENV,
++    features = _FEATURES,
++    deps = [":testautomation_lib"],
++)
++
++cc_test(
++    name = "testautomation_no_simd",
++    size = "medium",
++    env = _ENV_NO_SIMD,
++    features = _FEATURES,
++    deps = [":testautomation_lib"],
++)
++
++cc_test(
++    name = "testplatform_no_simd",
++    size = "small",
++    srcs = ["testplatform.c"],
++    env = _ENV_NO_SIMD,
++    features = _FEATURES,
++    local_defines = _DEFINES,
++    deps = _DEPS,
++)
++
++# With the timeout ctest gives each, where that is above the default.
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/test/CMakeLists.txt#L321-L444
++[
++    cc_test(
++        name = name,
++        size = "small",
++        timeout = timeout,
++        srcs = [name + ".c"],
++        copts = copts,
++        env = _ENV,
++        features = _FEATURES,
++        local_defines = _DEFINES,
++        deps = _DEPS,
++    )
++    for name, timeout, copts in [
++        ("testatomic", "short", []),
++        ("testaudioinfo", "short", []),
++        ("testbounds", "short", []),
++        ("testdisplayinfo", "short", []),
++        ("testerror", "short", []),
++        ("testevdev", "short", []),
++        ("testfile", "short", []),
++        ("testfilesystem", "short", []),
++        ("testkeys", "short", []),
++        ("testlocale", "short", []),
++        ("testplatform", "short", []),
++        ("testpower", "short", []),
++        ("testqsort", "short", []),
++        ("testrwlock", "moderate", []),
++        ("testthread", "moderate", []),
++        ("testver", "short", _C90),
++        ("torturethread", "moderate", []),
++    ]
++]
++
++# testsymbols takes the address of every function SDL exports, which against
++# a static library catches a source file missing from the lists above.
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/test/CMakeLists.txt#L340
++cc_test(
++    name = "testsymbols",
++    size = "small",
++    srcs = ["testsymbols.c"],
++    args = [
++        "0",
++        "10",
++        "20",
++        "40",
++        "80",
++        "160",
++        "320",
++        "640",
++    ],
++    env = _ENV,
++    features = _FEATURES,
++    local_defines = _DEFINES,
++    deps = _DEPS,
++)
++
++# --automated generates its own images. Given a file name as well, the
++# program frees that argv string on exit and crashes.
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/test/CMakeLists.txt#L435
++cc_test(
++    name = "testyuv",
++    size = "small",
++    srcs = [
++        "testutils.c",
++        "testutils.h",
++        "testyuv.c",
++        "testyuv_cvt.c",
++        "testyuv_cvt.h",
++    ],
++    args = ["--automated"],
++    env = _ENV,
++    features = _FEATURES,
++    local_defines = _DEFINES,
++    deps = _DEPS,
++)
++
++# ctest passes childprocess by absolute path; bazel_testprocess_main.cc finds
++# both programs in the runfiles, which on Windows are a manifest, not a tree.
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/test/CMakeLists.txt#L456-L463
++cc_binary(
++    name = "childprocess",
++    testonly = True,
++    srcs = ["childprocess.c"],
++    features = _FEATURES,
++    local_defines = _DEFINES,
++    deps = _DEPS,
++)
++
++cc_binary(
++    name = "testprocess_bin",
++    testonly = True,
++    srcs = ["testprocess.c"],
++    features = _FEATURES,
++    local_defines = _DEFINES,
++    deps = _DEPS,
++)
++
++cc_test(
++    name = "testprocess",
++    size = "small",
++    srcs = ["bazel_testprocess_main.cc"],
++    args = [
++        "$(rlocationpath :testprocess_bin)",
++        "$(rlocationpath :childprocess)",
++    ],
++    data = [
++        ":childprocess",
++        ":testprocess_bin",
++    ],
++    env = _ENV,
++    features = _FEATURES,
++    deps = ["@rules_cc//cc/runfiles"],
++)
++
++# SDL_ASSERT_LEVEL=1 compiles out testsem's 2050 ms deadline check, as SDL's
++# own RelWithDebInfo CI does for the whole suite. macOS timer leeway misses it
++# by 12 to 150 ms; Linux and Windows measure 1999 to 2000 ms and keep it.
++# https://github.com/libsdl-org/SDL/blob/release-3.4.18/test/testsem.c#L106-L126
++cc_test(
++    name = "testsem",
++    size = "small",
++    timeout = "moderate",
++    srcs = ["testsem.c"],
++    args = ["10"],
++    env = _ENV,
++    features = _FEATURES,
++    local_defines = _DEFINES + select({
++        "@platforms//os:macos": ["SDL_ASSERT_LEVEL=1"],
++        "//conditions:default": [],
++    }),
++    deps = _DEPS,
++)
++
++cc_test(
++    name = "testtimer",
++    size = "small",
++    timeout = "moderate",
++    srcs = ["testtimer.c"],
++    args = ["--no-interactive"],
++    env = _ENV,
++    features = _FEATURES,
++    local_defines = _DEFINES,
++    deps = _DEPS,
++)
+diff --git a/test/bazel_testprocess_main.cc b/test/bazel_testprocess_main.cc
+new file mode 100644
+--- /dev/null
++++ b/test/bazel_testprocess_main.cc
+@@ -0,0 +1,110 @@
++// Not upstream. testprocess takes childprocess's path and starts it with
++// SDL_CreateProcess; ctest passes an absolute path. A Bazel test has only
++// runfiles, which on Windows are a manifest, not a directory tree, so this
++// launcher resolves both executables through the runfiles library.
++
++#include <cerrno>
++#include <cstdio>
++#include <memory>
++#include <string>
++#include <vector>
++
++#ifdef _WIN32
++#include <process.h>
++#else
++#include <unistd.h>
++#endif
++
++#include "rules_cc/cc/runfiles/runfiles.h"
++
++using rules_cc::cc::runfiles::Runfiles;
++
++namespace {
++
++std::string resolve(const Runfiles &runfiles, const char *rlocation) {
++  std::string path = runfiles.Rlocation(rlocation);
++#ifdef _WIN32
++  // CreateProcess wants the native separator.
++  for (char &c : path) {
++    if (c == '/') c = '\\';
++  }
++#endif
++  return path;
++}
++
++#ifdef _WIN32
++// Quotes one argument the way the child's C runtime splits a command line
++// again: a backslash is literal unless it runs into the closing quote, and an
++// embedded quote needs its own backslash. Plain concatenation mangles a
++// --test_arg ending in a path separator.
++std::string quote(const std::string &arg) {
++  std::string out = "\"";
++  for (size_t i = 0; i < arg.size(); ++i) {
++    size_t backslashes = 0;
++    while (i < arg.size() && arg[i] == '\\') {
++      ++backslashes;
++      ++i;
++    }
++    if (i == arg.size()) {
++      out.append(backslashes * 2, '\\');
++      break;
++    }
++    if (arg[i] == '"') {
++      out.append(backslashes * 2 + 1, '\\');
++    } else {
++      out.append(backslashes, '\\');
++    }
++    out.push_back(arg[i]);
++  }
++  out.push_back('"');
++  return out;
++}
++#endif
++
++}  // namespace
++
++int main(int argc, char *argv[]) {
++  if (argc < 3) {
++    std::fprintf(stderr, "usage: %s <testprocess rlocation> <childprocess rlocation> [harness args...]\n", argv[0]);
++    return 2;
++  }
++
++  std::string error;
++  const std::unique_ptr<Runfiles> runfiles(Runfiles::CreateForTest(&error));
++  if (runfiles == nullptr) {
++    std::fprintf(stderr, "bazel_testprocess_main: cannot initialise runfiles: %s\n", error.c_str());
++    return 1;
++  }
++
++  const std::string testprocess = resolve(*runfiles, argv[1]);
++  const std::string childprocess = resolve(*runfiles, argv[2]);
++  if (testprocess.empty() || childprocess.empty()) {
++    std::fprintf(stderr, "bazel_testprocess_main: not in the runfiles: %s or %s\n", argv[1], argv[2]);
++    return 1;
++  }
++
++#ifdef _WIN32
++  // _spawnv joins argv into one command line, so quote each argument.
++  std::vector<std::string> quoted = {quote(testprocess), quote(childprocess)};
++  for (int i = 3; i < argc; ++i) quoted.push_back(quote(argv[i]));
++  std::vector<const char *> child_argv;
++  for (const std::string &arg : quoted) child_argv.push_back(arg.c_str());
++  child_argv.push_back(nullptr);
++  errno = 0;
++  const intptr_t status = _spawnv(_P_WAIT, testprocess.c_str(), child_argv.data());
++  // -1 is also a legitimate exit code, so errno is what separates the two.
++  if (status == -1 && errno != 0) {
++    std::perror("bazel_testprocess_main: _spawnv");
++    return 1;
++  }
++  std::fprintf(stderr, "bazel_testprocess_main: testprocess exited with %d (0x%08lx)\n", static_cast<int>(status), static_cast<unsigned long>(status));
++  return static_cast<int>(status);
++#else
++  std::vector<const char *> child_argv = {testprocess.c_str(), childprocess.c_str()};
++  for (int i = 3; i < argc; ++i) child_argv.push_back(argv[i]);
++  child_argv.push_back(nullptr);
++  execv(testprocess.c_str(), const_cast<char *const *>(child_argv.data()));
++  std::perror("bazel_testprocess_main: execv");
++  return 1;
++#endif
++}
+diff --git a/test_module/BUILD.bazel b/test_module/BUILD.bazel
+new file mode 100644
+--- /dev/null
++++ b/test_module/BUILD.bazel
+@@ -0,0 +1,11 @@
++load("@rules_cc//cc:defs.bzl", "cc_test")
++
++# A consumer from outside the module: visibility, the archives a consumer links,
++# and on macOS the Objective-C half and its frameworks. C++ exercises the
++# headers' extern "C" guards.
++cc_test(
++    name = "smoke_test",
++    size = "small",
++    srcs = ["smoke.cc"],
++    deps = ["@sdl3"],
++)
+diff --git a/test_module/MODULE.bazel b/test_module/MODULE.bazel
+new file mode 100644
+--- /dev/null
++++ b/test_module/MODULE.bazel
+@@ -0,0 +1,13 @@
++"""A consumer of the module, for BCR presubmit."""
++
++module(
++    name = "sdl3_test_module",
++    version = "0.0.1",
++)
++
++bazel_dep(name = "rules_cc", version = "0.2.16")
++bazel_dep(name = "sdl3", version = "3.4.18.bcr.1")
++local_path_override(
++    module_name = "sdl3",
++    path = "..",
++)
+diff --git a/test_module/smoke.cc b/test_module/smoke.cc
+new file mode 100644
+--- /dev/null
++++ b/test_module/smoke.cc
+@@ -0,0 +1,16 @@
++#include <SDL3/SDL_log.h>
++#include <SDL3/SDL_version.h>
++
++// The headers a consumer compiles against and the library it links must be the
++// same SDL.
++auto main(int /*argc*/, char** /*argv*/) -> int {
++    const int compiled = SDL_VERSION;
++    const int linked = SDL_GetVersion();
++
++    SDL_Log("Compiled against SDL %d.%d.%d, linked against SDL %d.%d.%d",
++            SDL_VERSIONNUM_MAJOR(compiled), SDL_VERSIONNUM_MINOR(compiled),
++            SDL_VERSIONNUM_MICRO(compiled), SDL_VERSIONNUM_MAJOR(linked),
++            SDL_VERSIONNUM_MINOR(linked), SDL_VERSIONNUM_MICRO(linked));
++
++    return compiled == linked ? 0 : 1;
++}
+diff --git a/wayland_protocols.bzl b/wayland_protocols.bzl
+new file mode 100644
+--- /dev/null
++++ b/wayland_protocols.bzl
+@@ -0,0 +1,47 @@
++"""Client code for the XML files of the Wayland protocols.
++
++SDL supplies these files in wayland-protocols/ and loads libwayland-client at
++runtime, so Bazel compiles the protocol tables into SDL itself, as SDL's CMake
++build does.
++
++The genrules write the headers at the package root. SDL includes them with
++quotes, and Bazel searches the output directory of the package first, so SDL's
++own wayland-client-protocol.h has priority over the header that the wayland
++module exports.
++"""
++
++# The Wayland backend is Linux-only; this also keeps `...` from building the
++# scanner elsewhere.
++_LINUX_ONLY = ["@platforms//os:linux"]
++
++def wayland_protocol_sources(xmls):
++    """This function declares the wayland-scanner genrules for `xmls`.
++
++    Returns a struct with `srcs` (the generated *-protocol.c files) and `hdrs`
++    (the generated *-client-protocol.h files).
++    """
++    srcs = []
++    hdrs = []
++    for xml in xmls:
++        protocol = xml.removeprefix("wayland-protocols/").removesuffix(".xml")
++        src = "%s-protocol.c" % protocol
++        hdr = "%s-client-protocol.h" % protocol
++        native.genrule(
++            name = "%s_wayland_protocol_source" % protocol,
++            srcs = [xml],
++            outs = [src],
++            cmd = "$(location @wayland//:wayland_scanner) private-code < $(location %s) > $@" % xml,
++            tools = ["@wayland//:wayland_scanner"],
++            target_compatible_with = _LINUX_ONLY,
++        )
++        native.genrule(
++            name = "%s_wayland_protocol_header" % protocol,
++            srcs = [xml],
++            outs = [hdr],
++            cmd = "$(location @wayland//:wayland_scanner) client-header < $(location %s) > $@" % xml,
++            tools = ["@wayland//:wayland_scanner"],
++            target_compatible_with = _LINUX_ONLY,
++        )
++        srcs.append(src)
++        hdrs.append(hdr)
++    return struct(srcs = srcs, hdrs = hdrs)

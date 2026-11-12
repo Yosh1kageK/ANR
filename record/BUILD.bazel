@@ -1,0 +1,69 @@
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
+load("//tools:slang.bzl", "slang_dxil_d3d12")
+
+# nr-record (README.md): recording a rendering feature's inputs (FG, SR, RR) losslessly in games, the format
+# (FORMAT.md) and its reader. This package is the public tool's: it depends on nothing of the rest of the repository.
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "format",
+    hdrs = [
+        "format.h",
+        "pool.h",
+    ],
+)
+
+# The recording core: ring, copy queue, writer threads and the folder's files (Windows: D3D12).
+cc_library(
+    name = "recorder",
+    srcs = ["recorder.cpp"],
+    hdrs = ["recorder.h"],
+    linkopts = ["d3d12.lib"],
+    target_compatible_with = ["@platforms//os:windows"],
+    deps = [
+        ":format",
+        "@zstd",
+    ],
+)
+
+# The GPU coding (FORMAT.md "Coding 3") as DXIL for D3D12 games: record_pack.slang's three entries.
+slang_dxil_d3d12(
+    name = "kernels",
+    src = "record_pack.slang",
+    entries = [
+        "record_init",
+        "record_pack",
+        "record_done",
+    ],
+)
+
+# The recording core's GPU side in D3D12 games: the kernels on the game's command list.
+cc_library(
+    name = "d3d12_packer",
+    srcs = ["d3d12_packer.cpp"],
+    hdrs = ["d3d12_packer.h"],
+    linkopts = ["d3d12.lib"],
+    target_compatible_with = ["@platforms//os:windows"],
+    deps = [":recorder"],
+)
+
+cc_library(
+    name = "reader",
+    srcs = ["reader.cpp"],
+    hdrs = ["reader.h"],
+    deps = [
+        ":format",
+        "@nlohmann_json//:json",
+        "@zstd",
+    ],
+)
+
+cc_binary(
+    name = "nr-record",
+    srcs = ["nr_record.cpp"],
+    deps = [
+        ":reader",
+        "@nlohmann_json//:json",
+    ],
+)

@@ -1,0 +1,351 @@
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+load("//tools:slang.bzl", "slang_dxil", "slang_spirv")
+
+# The clip viewer: native video comparison and the offline export of the renderer binary (renderer/README.md
+# "Compare mode"); the study viewer is in study/. The logic that decides what is shown (clock, pairing,
+# view geometry, camera, project, sync detection) has no GPU and no OS code and is tested here; the decoders, the
+# viewer and the shaders sit on top.
+
+package(default_visibility = ["//renderer:__subpackages__"])
+
+# --- Pure logic -------------------------------------------------------------------------------------------------------
+
+cc_library(
+    name = "pure",
+    srcs = [
+        "edit_list.cpp",
+        "lockstep.cpp",
+        "logos.cpp",
+        "mark_runner.cpp",
+        "offset_estimate.cpp",
+        "offset_map.cpp",
+        "pair_pick.cpp",
+        "pair_registry.cpp",
+        "project.cpp",
+    ],
+    hdrs = [
+        "camera.h",
+        "edit_list.h",
+        "frame_cache.h",
+        "lockstep.h",
+        "logos.h",
+        "mark_runner.h",
+        "mark_visibility.h",
+        "offset_estimate.h",
+        "offset_map.h",
+        "pair_pick.h",
+        "pair_registry.h",
+        "project.h",
+        "view_math.h",
+    ],
+    deps = [
+        "//renderer:paths",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_library(
+    name = "check",
+    testonly = True,
+    hdrs = ["check.h"],
+)
+
+cc_test(
+    name = "view_math_test",
+    size = "small",
+    srcs = ["view_math_test.cpp"],
+    deps = [":check", ":pure"],
+)
+
+cc_test(
+    name = "camera_test",
+    size = "small",
+    srcs = ["camera_test.cpp"],
+    deps = [":check", ":pure"],
+)
+
+cc_test(
+    name = "edit_list_test",
+    size = "small",
+    srcs = ["edit_list_test.cpp"],
+    deps = [":check", ":pure"],
+)
+
+cc_test(
+    name = "logos_test",
+    size = "small",
+    srcs = ["logos_test.cpp"],
+    deps = [":check", ":pure"],
+)
+
+cc_test(
+    name = "mark_runner_test",
+    size = "small",
+    srcs = ["mark_runner_test.cpp"],
+    deps = [":check", ":pure"],
+)
+
+cc_test(
+    name = "mark_visibility_test",
+    size = "small",
+    srcs = ["mark_visibility_test.cpp"],
+    deps = [":check", ":pure"],
+)
+
+cc_test(
+    name = "lockstep_test",
+    size = "small",
+    srcs = ["lockstep_test.cpp"],
+    deps = [":check", ":pure"],
+)
+
+cc_test(
+    name = "frame_cache_test",
+    size = "small",
+    srcs = ["frame_cache_test.cpp"],
+    deps = [":check", ":pure"],
+)
+
+cc_test(
+    name = "project_test",
+    size = "small",
+    srcs = ["project_test.cpp"],
+    deps = [":check", ":pure"],
+)
+
+cc_test(
+    name = "pair_registry_test",
+    size = "small",
+    srcs = ["pair_registry_test.cpp"],
+    deps = [":check", ":pure"],
+)
+
+cc_test(
+    name = "pair_pick_test",
+    size = "small",
+    srcs = ["pair_pick_test.cpp"],
+    deps = [":check", ":pure"],
+)
+
+cc_test(
+    name = "offset_estimate_test",
+    size = "small",
+    srcs = ["offset_estimate_test.cpp"],
+    deps = [":check", ":pure"],
+)
+
+# The VideoSource contract between the clip viewer and its decoders (GPU decode in //renderer/clips/video, ffmpeg below).
+cc_library(
+    name = "video_source",
+    hdrs = ["video_source.h"],
+    visibility = ["//visibility:public"],
+    deps = ["@nri_framework"],
+)
+
+# The GPU decoder's check: bit-exact against ffmpeg, decode rate, seeks (renderer/README.md, "GPU video decode").
+alias(
+    name = "decode_check",
+    actual = "//renderer/clips/video:decode_check",
+    visibility = ["//visibility:public"],
+)
+
+# --- Media: sources, the player over two of them, ffmpeg and ffprobe ---------------------------------------------------
+
+cc_library(
+    name = "media",
+    srcs = [
+        "ffmpeg_source.cpp",
+        "player.cpp",
+        "probe.cpp",
+        "encoders.cpp",
+        "process.cpp",
+    ],
+    hdrs = [
+        "ffmpeg_source.h",
+        "player.h",
+        "probe.h",
+        "encoders.h",
+        "process.h",
+        "video_constants.h",
+        "yuv.h",
+    ],
+    deps = [
+        ":pure",
+        ":video_source",
+        "@nlohmann_json//:json",
+        "@nri_framework",
+        "@spdlog",
+    ],
+)
+
+cc_test(
+    name = "yuv_test",
+    size = "small",
+    srcs = ["yuv_test.cpp"],
+    deps = [":check", ":media"],
+)
+
+cc_test(
+    name = "probe_test",
+    size = "small",
+    srcs = ["probe_test.cpp"],
+    deps = [":check", ":media"],
+)
+
+cc_test(
+    name = "video_constants_test",
+    size = "small",
+    srcs = ["video_constants_test.cpp"],
+    deps = [":check", ":media"],
+)
+
+cc_test(
+    name = "player_test",
+    size = "small",
+    srcs = ["player_test.cpp"],
+    deps = [":check", ":media"],
+)
+
+# --- Shaders ----------------------------------------------------------------------------------------------------------
+
+ENTRIES = [
+    "fullscreen_vs:vertex",
+    "video_fs:fragment",
+    "raw_fs:fragment",
+    "ui_layer_fs:fragment",
+    "still_fs:fragment",  # captures/stills.slang, the Captures tab's picture pass
+]
+
+# Vulkan (Linux, Windows): SPIR-V with the HLSL registers shifted to NRI's Vulkan binding offsets (as renderer/BUILD.bazel).
+# Metal (macOS): DXIL, whose registers NRI maps itself.
+slang_spirv(
+    name = "shaders",
+    src = "clips.slang",
+    deps = ["//renderer:display_common.slang", "//renderer/clips/captures:stills.slang"],
+    copts = [
+        "-fvk-s-shift", "0", "all",
+        "-fvk-t-shift", "128", "all",
+        "-fvk-b-shift", "32", "all",
+        "-fvk-u-shift", "64", "all",
+        "-matrix-layout-column-major",
+        "-warnings-disable", "39001",  # entry points share registers (each uses its own)
+    ],
+    entries = ENTRIES,
+)
+
+slang_dxil(
+    name = "shaders_dxil",
+    src = "clips.slang",
+    deps = ["//renderer:display_common.slang", "//renderer/clips/captures:stills.slang"],
+    dxil_copts = [
+        "-matrix-layout-column-major",
+        "-warnings-disable", "39001",
+    ],
+    entries = ENTRIES,
+)
+
+# --- The GPU pieces the viewers share: the device, the video pass and the swap chain ------------------------------------
+
+cc_library(
+    name = "gpu",
+    srcs = [
+        "gfx.cpp",
+        "swap_output.cpp",
+        "video_pass.cpp",
+    ],
+    hdrs = [
+        "gfx.h",
+        "swap_output.h",
+        "video_pass.h",
+    ],
+    deps = [
+        ":media",
+        ":pure",
+        "//renderer:app",
+        "//renderer/clips/video:nri_video_source",
+        "//device",
+        "@imgui//:backends_sdl3",
+        "@nri_framework",
+        "@sdl3",
+        "@spdlog",
+    ],
+)
+
+# The study viewer's entry (study_entry.h); the binary links renderer/clips/study (or, where a build has no study
+# viewer, a stand-in).
+cc_library(
+    name = "study_entry",
+    hdrs = ["study_entry.h"],
+)
+
+# --- The composite: the overlay, the logos, the offscreen target and the export (shared with the Captures tab) ------------
+
+cc_library(
+    name = "composite",
+    srcs = [
+        "composer.cpp",
+        "exporter.cpp",
+        "logo_layer.cpp",
+        "overlay.cpp",
+    ],
+    hdrs = [
+        "composer.h",
+        "exporter.h",
+        "logo_layer.h",
+        "overlay.h",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":gpu",
+        ":media",
+        ":pure",
+        "//renderer:app",
+        "//device",
+        "@imgui//:backends_sdl3",
+        "@nlohmann_json//:json",
+        "@nri_framework",
+        "@sdl3",
+        "@spdlog",
+    ],
+)
+
+# --- The viewer -------------------------------------------------------------------------------------------------------
+
+cc_library(
+    name = "viewer",
+    srcs = [
+        "clip_mode.cpp",
+        "clip_pick.cpp",
+        "clip_session.cpp",
+        "clip_ui.cpp",
+        "clip_viewer.cpp",
+        "file_dialog.cpp",
+        "open_video.cpp",
+        "sync_job.cpp",
+    ],
+    hdrs = [
+        "clip_mode.h",
+        "clip_viewer.h",
+        "file_dialog.h",
+        "sync_job.h",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":composite",
+        ":gpu",
+        ":media",
+        ":pure",
+        ":study_entry",
+        "//renderer:app",
+        "//device",
+        "//renderer:mode_switch",
+        "//renderer:modes",
+        "//renderer:paths",
+        "//renderer/clips/captures:studio",
+        "@imgui//:backends_sdl3",
+        "@nlohmann_json//:json",
+        "@nri_framework",
+        "@sdl3",
+        "@spdlog",
+    ],
+)

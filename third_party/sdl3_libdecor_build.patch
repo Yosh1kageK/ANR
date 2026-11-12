@@ -1,0 +1,30 @@
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -147,8 +147,8 @@
+         "@SDL_XKBCOMMON_VERSION_MINOR@": "5",
+         "@SDL_XKBCOMMON_VERSION_PATCH@": "0",
+         "@SDL_LIBDECOR_VERSION_MAJOR@": "0",
+-        "@SDL_LIBDECOR_VERSION_MINOR@": "0",
+-        "@SDL_LIBDECOR_VERSION_PATCH@": "0",
++        "@SDL_LIBDECOR_VERSION_MINOR@": "2",
++        "@SDL_LIBDECOR_VERSION_PATCH@": "5",
+         # Only read under SDL_DEFAULT_ASSERT_LEVEL_CONFIGURED, which is off.
+         "@SDL_DEFAULT_ASSERT_LEVEL@": "",
+     },
+@@ -456,6 +456,7 @@
+         "@wayland//:wayland_cursor",
+         "@wayland//:wayland_egl",
+         "@xkbcommon//:xkbcommon_headers",
++        "@libdecor//:headers",
+     ],
+ )
+ 
+@@ -502,6 +503,8 @@
+         "@platforms//os:linux": [
+             "_REENTRANT",
+             "USING_GENERATED_CONFIG_H",
++            "HAVE_LIBDECOR_H=1",
++            "SDL_VIDEO_DRIVER_WAYLAND_DYNAMIC_LIBDECOR=\\\"libdecor-0.so.0\\\"",
+         ],
+         "@platforms//os:macos": _STEAM_DEFINES,
+         "@platforms//os:windows": _STEAM_DEFINES,

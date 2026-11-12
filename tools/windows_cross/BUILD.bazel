@@ -1,0 +1,3 @@
+# Windows x64 cross compilation on Linux: the repository rule (windows_cross.bzl) that MODULE.bazel instantiates as
+# @windows_cross. README.md has the use.
+exports_files(["windows_cross.bzl"])

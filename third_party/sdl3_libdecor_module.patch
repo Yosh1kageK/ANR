@@ -1,0 +1,26 @@
+--- a/MODULE.bazel
++++ b/MODULE.bazel
+@@ -28,3 +28,23 @@
+ # wayland asks for libffi 3.4.7.bcr.3, which does not build on Linux aarch64;
+ # 3.4.7.bcr.4 gives macOS aarch64 its own settings and fixes it.
+ bazel_dep(name = "libffi", version = "3.4.7.bcr.4")
++
++# libdecor's header (patched in by neural-rendering, third_party/sdl3_libdecor.patch): SDL loads libdecor-0.so.0 at
++# run time for window decorations on Wayland compositors without server-side ones (GNOME).
++http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
++
++http_archive(
++    name = "libdecor",
++    build_file_content = """load("@rules_cc//cc:defs.bzl", "cc_library")
++
++cc_library(
++    name = "headers",
++    hdrs = ["src/libdecor.h"],
++    includes = ["src"],
++    visibility = ["//visibility:public"],
++)
++""",
++    sha256 = "39c109a9a7eae943ba34d18a282c447d5729f9c486c8bc05ea305e4acd341522",
++    strip_prefix = "libdecor-0.2.5",
++    urls = ["https://gitlab.freedesktop.org/libdecor/libdecor/-/archive/0.2.5/libdecor-0.2.5.tar.gz"],
++)

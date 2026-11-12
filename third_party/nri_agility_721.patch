@@ -1,0 +1,73 @@
+diff --git a/Source/D3D12/CommandBufferD3D12.hpp b/Source/D3D12/CommandBufferD3D12.hpp
+index 9dc8dcd..bbf2b79 100755
+--- a/Source/D3D12/CommandBufferD3D12.hpp
++++ b/Source/D3D12/CommandBufferD3D12.hpp
+@@ -3,7 +3,9 @@
+ static uint8_t QueryLatestInterface(ComPtr<ID3D12GraphicsCommandList>& in, ComPtr<ID3D12GraphicsCommandListBest>& out) {
+     static const IID versions[] = {
+ #if NRI_ENABLE_AGILITY_SDK_SUPPORT
++#    ifdef __ID3D12GraphicsCommandList12_FWD_DEFINED__
+         __uuidof(ID3D12GraphicsCommandList12),
++#    endif
+         __uuidof(ID3D12GraphicsCommandList11),
+         __uuidof(ID3D12GraphicsCommandList10),
+         __uuidof(ID3D12GraphicsCommandList9),
+diff --git a/Source/D3D12/DeviceD3D12.hpp b/Source/D3D12/DeviceD3D12.hpp
+index d916cc4..ceefa85 100755
+--- a/Source/D3D12/DeviceD3D12.hpp
++++ b/Source/D3D12/DeviceD3D12.hpp
+@@ -3,7 +3,9 @@
+ static uint8_t QueryLatestInterface(ComPtr<ID3D12Device>& in, ComPtr<ID3D12DeviceBest>& out) {
+     static const IID versions[] = {
+ #if NRI_ENABLE_AGILITY_SDK_SUPPORT
++#    ifdef __ID3D12Device16_FWD_DEFINED__
+         __uuidof(ID3D12Device16),
++#    endif
+         __uuidof(ID3D12Device15),
+         __uuidof(ID3D12Device14),
+         __uuidof(ID3D12Device13),
+@@ -791,7 +793,7 @@ HRESULT DeviceD3D12::CreateVma() {
+ }
+ 
+ HRESULT DeviceD3D12::CheckFeatureSupport(D3D12_FEATURE feature, void* data, uint32_t size) const {
+-#if NRI_ENABLE_AGILITY_SDK_SUPPORT
++#if NRI_ENABLE_AGILITY_SDK_SUPPORT && defined(__ID3D12Device16_FWD_DEFINED__)
+     if (m_Version >= 16)
+         return m_Device->CheckFeatureSupport1(feature, data, size, NRI_AGILITY_SDK_VERSION_MAJOR);
+ #endif
+@@ -957,10 +959,12 @@ void DeviceD3D12::FillDesc(bool disableD3D12EnhancedBarrier) {
+     m_Desc.shaderStage.compute.dispatchMaxDim[0] = options22.Max1DDispatchSize;
+     m_Desc.shaderStage.task.dispatchMaxDim[0] = options22.Max1DDispatchMeshSize;
+ 
+-    // Agility 1.620
++    // Agility 1.620 (the 1.721 preview's D3D12_FEATURE_DATA_ASYNC_COMMANDS has no "Impl")
++#    ifdef __ID3D12Device16_FWD_DEFINED__
+     D3D12_FEATURE_DATA_ASYNC_COMMANDS asyncCommands = {};
+     hr = CheckFeatureSupport(D3D12_FEATURE_ASYNC_COMMANDS, &asyncCommands, sizeof(asyncCommands));
+     m_HasNativeAsyncCommands = SUCCEEDED(hr) && asyncCommands.Impl == D3D12_ASYNC_COMMANDS_IMPL_NATIVE;
++#    endif
+     // TODO: evaluate native "ID3D12GraphicsCommandList12" batched copies and "ClearTextureSubresources", "ClearBoundRenderTargetViews", "ClearBoundDepthStencilView" and "FillBuffers".
+     // Preserve enhanced-barrier synchronization and legacy fallbacks when adopting these commands.
+ 
+diff --git a/Source/D3D12/SharedD3D12.h b/Source/D3D12/SharedD3D12.h
+index 8769e26..7d065b6 100755
+--- a/Source/D3D12/SharedD3D12.h
++++ b/Source/D3D12/SharedD3D12.h
+@@ -47,8 +47,17 @@ namespace nri {
+ 
+ // Queried interfaces: newer versions retain runtime fallback when the query list is updated too
+ #if NRI_ENABLE_AGILITY_SDK_SUPPORT
++// Agility SDK headers before 1.620 (the 1.721 preview) declare up to ID3D12Device15 and ID3D12GraphicsCommandList11
++#    ifdef __ID3D12Device16_FWD_DEFINED__
+ typedef ID3D12Device16 ID3D12DeviceBest;
++#    else
++typedef ID3D12Device15 ID3D12DeviceBest;
++#    endif
++#    ifdef __ID3D12GraphicsCommandList12_FWD_DEFINED__
+ typedef ID3D12GraphicsCommandList12 ID3D12GraphicsCommandListBest;
++#    else
++typedef ID3D12GraphicsCommandList11 ID3D12GraphicsCommandListBest;
++#    endif
+ typedef ID3D12VideoDecodeCommandList4 ID3D12VideoDecodeCommandListBest;
+ typedef ID3D12VideoEncodeCommandList5 ID3D12VideoEncodeCommandListBest;
+ typedef ID3D12InfoQueue1 ID3D12InfoQueueBest;

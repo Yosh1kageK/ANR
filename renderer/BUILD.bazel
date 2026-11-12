@@ -1,0 +1,143 @@
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
+
+# The renderer's viewer (README.md): the launcher, the compare mode, and the captures browser, in one binary
+# (no scene renderer, no study viewer). bazel run //renderer opens the launcher; --compare and --captures start a mode.
+
+# The sRGB, PQ and display light conversions that clips/clips.slang includes.
+exports_files(["display_common.slang"])
+
+# The window, input and frame loop on SDL3 (app.h), the display code (display.h) and the dock layout. The launcher and
+# the clip viewer (//renderer/clips) are built on it.
+cc_library(
+    name = "app",
+    srcs = [
+        "app.cpp",
+        "display.cpp",
+        "dock_layout.cpp",
+    ],
+    hdrs = [
+        "app.h",
+        "display.h",
+        "dock_layout.h",
+        "input.h",
+        "window_fit.h",
+    ],
+    visibility = ["//renderer:__subpackages__"],
+    deps = [
+        "@imgui//:backends_sdl3",
+        "@nri_framework",
+        "@sdl3",
+        "@spdlog",
+    ] + select({
+        "@platforms//os:macos": [],
+        "//conditions:default": ["@vulkan_headers"],
+    }),
+)
+
+# Where the renderer keeps its own files (paths.h).
+cc_library(
+    name = "paths",
+    srcs = ["paths.cpp"],
+    hdrs = ["paths.h"],
+    visibility = ["//renderer:__subpackages__"],
+)
+
+# The modes of the one binary and how it picks and changes them (README.md "Modes"): the rule from the command line (pure),
+# the restart a Mode menu asks for, and the launcher window `bazel run //renderer` opens with no arguments.
+cc_library(
+    name = "modes",
+    srcs = ["modes.cpp"],
+    hdrs = ["modes.h"],
+    visibility = ["//renderer:__subpackages__"],
+)
+
+cc_library(
+    name = "mode_switch",
+    srcs = ["mode_switch.cpp"],
+    hdrs = ["mode_switch.h"],
+    visibility = ["//renderer:__subpackages__"],
+    deps = [
+        ":modes",
+        ":paths",
+        "//renderer/clips:media",
+        "@imgui//:backends_sdl3",
+        "@spdlog",
+    ],
+)
+
+# The scene renderer's entry (scene.h): scene_missing.cpp's stand-in in this build.
+cc_library(
+    name = "scene_header",
+    hdrs = ["scene.h"],
+)
+
+cc_library(
+    name = "launcher",
+    srcs = ["launcher.cpp"],
+    hdrs = ["launcher.h"],
+    deps = [
+        ":app",
+        ":mode_switch",
+        ":modes",
+        ":scene_header",
+        "//device",
+        "//renderer/clips:gpu",
+        "//renderer/clips:media",
+        "//renderer/clips/captures:files",
+        "//renderer/clips/captures:pure",
+        "@imgui//:backends_sdl3",
+        "@nri_framework",
+        "@sdl3",
+        "@spdlog",
+    ],
+)
+
+# The renderer. Vulkan on Linux and Windows, Metal 4 on macOS (DXIL shaders that NRI converts with Apple's Metal Shader
+# Converter). This build has no scene renderer (scene_missing.cpp).
+cc_binary(
+    name = "renderer",
+    srcs = [
+        "main.cpp",
+        "scene_missing.cpp",
+        "study_missing.cpp",
+    ],
+    data = select({
+        "@platforms//os:linux": [
+            "//renderer/clips:shaders",
+            "@vulkan_loader//:libvulkan.so.1",
+        ],
+        "@platforms//os:windows": ["//renderer/clips:shaders"],
+        "@platforms//os:macos": ["//renderer/clips:shaders_dxil"],
+    }),
+    deps = [
+        ":launcher",
+        ":mode_switch",
+        ":modes",
+        ":scene_header",
+        "//renderer/clips:study_entry",
+        "//renderer/clips:viewer",
+    ],
+)
+
+cc_test(
+    name = "modes_test",
+    size = "small",
+    srcs = ["modes_test.cpp"],
+    deps = [
+        ":modes",
+        "//renderer/clips:check",
+    ],
+)
+
+cc_test(
+    name = "input_test",
+    size = "small",
+    srcs = ["input_test.cpp", "input.h"],
+    deps = ["@sdl3"],
+)
+
+cc_test(
+    name = "window_fit_test",
+    size = "small",
+    srcs = ["window_fit_test.cpp", "window_fit.h"],
+)

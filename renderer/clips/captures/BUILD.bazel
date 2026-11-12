@@ -1,0 +1,113 @@
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+
+# The Captures tab of the compare tool (renderer/README.md, "Captures"): the browser of game recordings (nr-record) and
+# captures, the still viewer and the generator jobs. The pure parts (the pairs, the readers, the curves, the sources, the
+# store) have no GPU and no window and are tested here; the studio sits on the viewer's GPU pieces
+# (//renderer/clips:composite and :gpu).
+
+package(default_visibility = ["//renderer:__subpackages__"])
+
+# The picture pass's Slang, included by //renderer/clips:clips.slang.
+exports_files(
+    ["stills.slang"],
+    visibility = ["//renderer/clips:__pkg__"],
+)
+
+cc_library(
+    name = "pure",
+    srcs = [
+        "capture_info.cpp",
+        "capture_reader.cpp",
+        "recording.cpp",
+        "sources.cpp",
+        "store.cpp",
+    ],
+    hdrs = [
+        "capture_info.h",
+        "capture_reader.h",
+        "curves.h",
+        "recording.h",
+        "sources.h",
+        "store.h",
+    ],
+    deps = [
+        "//record:reader",
+        "//renderer:paths",
+        "@nlohmann_json//:json",
+    ],
+)
+
+# PNG files and thumbnails: deflate and image reading from NRIFramework's copies of stb.
+cc_library(
+    name = "files",
+    srcs = [
+        "png_write.cpp",
+        "thumbnails.cpp",
+        "user_texture.cpp",
+    ],
+    hdrs = [
+        "png_write.h",
+        "thumbnails.h",
+        "user_texture.h",
+    ],
+    deps = [
+        ":pure",
+        "@imgui//:backends_sdl3",
+        "@nri_framework",
+        "@spdlog",
+    ],
+)
+
+# POSIX: it sets HOME for the Steam folders it makes.
+cc_test(
+    name = "captures_test",
+    size = "small",
+    srcs = ["captures_test.cpp"],
+    target_compatible_with = select({
+        "@platforms//os:windows": ["@platforms//:incompatible"],
+        "//conditions:default": [],
+    }),
+    deps = [
+        ":files",
+        ":pure",
+        "//renderer/clips:check",
+        "@nri_framework",
+    ],
+)
+
+cc_library(
+    name = "studio",
+    srcs = [
+        "dialogs.cpp",
+        "image_store.cpp",
+        "jobs.cpp",
+        "still_pass.cpp",
+        "studio.cpp",
+        "studio_save.cpp",
+        "studio_ui.cpp",
+    ],
+    hdrs = [
+        "dialogs.h",
+        "image_store.h",
+        "jobs.h",
+        "still_pass.h",
+        "studio.h",
+    ],
+    visibility = ["//renderer:__subpackages__"],
+    deps = [
+        ":files",
+        ":pure",
+        "//renderer:app",
+        "//renderer:mode_switch",
+        "//renderer:modes",
+        "//renderer/clips:composite",
+        "//renderer/clips:gpu",
+        "//renderer/clips:media",
+        "//renderer/clips:pure",
+        "@imgui//:backends_sdl3",
+        "@nlohmann_json//:json",
+        "@nri_framework",
+        "@sdl3",
+        "@spdlog",
+    ],
+)

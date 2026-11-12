@@ -1,0 +1,31 @@
+load("@rules_cc//cc:defs.bzl", "cc_binary")
+
+# The capture DLL (capture.cpp, README.md): an NGX frame generation feature that OptiScaler loads as a custom DLSS-G
+# provider and that records the game's frame generation inputs. Windows x64:
+# bazel build --config=windows_cross //record/capture:package
+
+cc_binary(
+    name = "nvngx_dlssg.dll",
+    srcs = ["capture.cpp"],
+    linkopts = [
+        "d3d12.lib",
+        "user32.lib",
+    ],
+    linkshared = True,
+    target_compatible_with = ["@platforms//os:windows"],
+    deps = [
+        "//record:d3d12_packer",
+        "//record:recorder",
+        "@dlss//:headers",
+    ],
+)
+
+# What goes into OptiScaler/custom/nr-record/dlssg/: the DLL, kernels/ (the three DXIL kernels) and nr_record.ini.
+filegroup(
+    name = "package",
+    srcs = [
+        "nr_record.ini",
+        ":nvngx_dlssg.dll",
+        "//record:kernels",
+    ],
+)

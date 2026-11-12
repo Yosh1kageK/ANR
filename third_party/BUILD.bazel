@@ -1,0 +1,113 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
+load("@rules_foreign_cc//foreign_cc:defs.bzl", "cmake")
+
+# BUILD files of the pinned third-party archives in MODULE.bazel.
+exports_files(glob(["*.BUILD"]))
+
+# NRI's NGX upscalers (DLSS SR and RR on Linux and Windows): off here, where nothing uses them, so no NVIDIA library is
+# linked. --//third_party:nri_ngx=true turns them on.
+bool_flag(
+    name = "nri_ngx",
+    build_setting_default = False,
+)
+
+[config_setting(
+    name = "nri_ngx_" + os,
+    constraint_values = ["@platforms//os:" + os],
+    flag_values = {":nri_ngx": "true"},
+) for os in ("linux", "windows")]
+
+config_setting(
+    name = "nri_ngx_off",
+    flag_values = {":nri_ngx": "false"},
+)
+
+# NRI's D3D12 backend on Windows: off here (the renderer's viewer draws with Vulkan). --//third_party:nri_d3d12=true
+# turns it on, with the Agility SDK's headers.
+bool_flag(
+    name = "nri_d3d12",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "nri_d3d12_windows",
+    constraint_values = ["@platforms//os:windows"],
+    flag_values = {":nri_d3d12": "true"},
+)
+
+config_setting(
+    name = "nri_d3d12_off",
+    flag_values = {":nri_d3d12": "false"},
+)
+
+# X11 headers from pinned X.Org releases (MODULE.bazel).
+cc_library(
+    name = "x11_headers",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@x11_proto//:headers",
+        "@x11_lib//:headers",
+        "@x11_xrandr//:headers",
+        "@x11_xrender//:headers",
+        "@x11_xfixes//:headers",
+        "@x11_xi//:headers",
+        "@x11_xinerama//:headers",
+        "@x11_xcursor//:headers",
+        "@x11_xext//:headers",
+    ],
+)
+
+# DXC (its dxc executable and libdxcompiler), for the DXIL shaders (tools/slang.bzl): the shaders of NRI's Metal
+# backend on macOS, where Microsoft publishes no DXC. Built from the pinned source with the settings of DXC's
+# cmake/caches/PredefinedParams.cmake, without SPIR-V code generation and tests.
+cmake(
+    name = "dxcompiler",
+    build_data = ["@directx_headers//:all_files"],
+    cache_entries = {
+        "CMAKE_BUILD_TYPE": "Release",
+        # A compiler: no fast math (it folds constants), C++17 as DXC's CMake asks, no LTO (a long link for a tool).
+        "CMAKE_C_FLAGS": "-fno-fast-math -fno-lto -w",
+        "CMAKE_CXX_FLAGS": "-fno-fast-math -fno-lto -std=c++17 -w",
+        "DIRECTX_HEADER_INCLUDE_DIR": "$$EXT_BUILD_ROOT$$/external/+http_archive+directx_headers/include",
+        "LLVM_APPEND_VC_REV": "OFF",
+        "LLVM_DEFAULT_TARGET_TRIPLE": "dxil-ms-dx",
+        "LLVM_ENABLE_EH": "ON",
+        "LLVM_ENABLE_RTTI": "ON",
+        "LLVM_ENABLE_TERMINFO": "OFF",
+        "LLVM_INCLUDE_DOCS": "OFF",
+        "LLVM_INCLUDE_EXAMPLES": "OFF",
+        "LLVM_INCLUDE_TESTS": "OFF",
+        "LLVM_OPTIMIZED_TABLEGEN": "OFF",
+        "LLVM_TARGETS_TO_BUILD": "None",
+        "LIBCLANG_BUILD_STATIC": "ON",
+        "CLANG_BUILD_EXAMPLES": "OFF",
+        "CLANG_CL": "OFF",
+        "CLANG_ENABLE_ARCMT": "OFF",
+        "CLANG_ENABLE_STATIC_ANALYZER": "OFF",
+        "CLANG_INCLUDE_TESTS": "OFF",
+        "HLSL_INCLUDE_TESTS": "OFF",
+        "ENABLE_SPIRV_CODEGEN": "OFF",
+        "SPIRV_BUILD_TESTS": "OFF",
+    },
+    generate_args = ["-G Ninja"],
+    install = False,
+    lib_source = "@dxc//:all_files",
+    out_shared_libs = select({
+        "@platforms//os:macos": ["libdxcompiler.dylib"],
+        "//conditions:default": ["libdxcompiler.so"],
+    }),
+    out_binaries = ["dxc"],
+    postfix_script = ("mkdir -p $$INSTALLDIR/lib $$INSTALLDIR/bin && cp -L $$BUILD_TMPDIR/lib/libdxcompiler.* " +
+                      "$$INSTALLDIR/lib/ && cp -L $$BUILD_TMPDIR/bin/dxc $$INSTALLDIR/bin/"),
+    # Built where a DXIL shader target needs it (macOS), not by bazel build //... elsewhere.
+    tags = [
+        "block-network",
+        "manual",
+    ],
+    targets = [
+        "dxc",
+        "dxcompiler",
+    ],
+    visibility = ["//visibility:public"],
+)
